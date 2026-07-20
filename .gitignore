@@ -1,0 +1,18 @@
+# ESP-IDF generated build output
+build/
+sdkconfig.old
+
+# ESP-IDF Component Manager downloads (restored from dependencies.lock)
+managed_components/
+
+# Local editor settings contain machine-specific ESP-IDF paths and ports
+.vscode/
+
+# Runtime/debug traces
+esp_traces/
+
+# OS and editor temporary files
+.DS_Store
+Thumbs.db
+*.swp
+*~

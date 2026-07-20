@@ -1,0 +1,661 @@
+#include "esp_err.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
+#include "freertos/timers.h"
+#include <time.h>
+#include <sys/time.h>
+#include <math.h>
+
+#include "my_i2c.h"
+#include "mpu_reader.h"
+#include "led_rgb.h"
+#include "drv8825.h"
+#include "controller.h"
+#include "timer_controller.h"
+#include "pid.h"
+#include "kalmanfilter.h"
+
+
+#define CTRL_QUEUE_SIZE 32 // Size of the queue for MPU6050 data frames
+#define LOW_THRESH_ROLL 20 // Threshold for roll angle to trigger balancing
+#define HIGH_THRESH_ROLL 150 // Threshold for roll angle to trigger balancing
+#define MAX_MPU_RESTART 10
+#define GPIO_MPU_INT GPIO_NUM_3
+#define TAG "CTRLER"
+#define MAX_ACCEL 5000.0f //was 4000
+#define MAX_PID 1500.0f //was 1100
+#define GPIO_STEP   1
+#define GPIO_DIR    4
+#define Kp 20.0f //was 15.0f was 35.0f was 20.0f
+#define Ki 0.0f //was 0.10f
+#define Kd 1.0f //was 20.0f was 8.5f was 15.0f
+#define TARGET_ANGLE 90.0f 
+
+typedef enum {
+    CTRL_INIT,  
+    CTRL_CONFIG,
+    CTRL_MPU_CALIBRATION, 
+    CTRL_START_MPU, 
+    CTRL_LOST_MPU,
+    CTRL_BALANCING,
+    CTRL_REMOTE_CONTROL, //do not use yet 
+    CTRL_ERROR,
+    CTRL_STOP,
+    CTRL_EXIT
+} ctrl_state_t;
+
+
+
+// STRUCTURE OF GLOBAL CONTEXT
+    //Led colors for states 
+    rgb_t init_col={64, 0,0}; // Initial color for LED RGB
+    rgb_t config_col={85, 25,0}; // Color for configuration state
+    rgb_t ready_col={0, 64,0}; // Color for calibration state
+    rgb_t error_col={32, 0,64}; // Color for error state
+    static portMUX_TYPE mpu_lock=portMUX_INITIALIZER_UNLOCKED;
+
+    static char msg_buf[64]; // Buffer for event messages
+    
+    typedef struct{
+        float roll;
+        float dt;
+        float pid;
+        float mot_dt;
+    }logs_ctrl_t;
+    #define LOG_BUFFER_SIZE 256 // Size of the log buffer
+    typedef struct {
+        logs_ctrl_t buffer[LOG_BUFFER_SIZE];
+        int index;
+        int count;
+    } logs_ctrl_buffer_t;
+
+ logs_ctrl_buffer_t log_buffer = { .index = 0, .count = 0 };
+
+void log_ctrl_print(const logs_ctrl_buffer_t* buf) {
+    for (int i = 0; i < buf->count; i++) {
+        //int idx = (buf->index + i) % LOG_BUFFER_SIZE;
+        logs_ctrl_t l = buf->buffer[i];
+        ESP_LOGI(TAG, "Roll: %.2f, dt: %.4f, PID: %.2f, mot_dt: %.4f, buff_count: %d", l.roll, l.dt, l.pid, l.mot_dt, buf->count);
+    }
+    ESP_LOGI(TAG, "------------------------------------------------------");
+    
+ }
+
+void log_ctrl_add(logs_ctrl_buffer_t* buf, float roll, float dt, float pid, float mot_dt) {
+    buf->buffer[buf->index] = (logs_ctrl_t){roll, dt, pid, mot_dt};
+    buf->index = (buf->index + 1) % LOG_BUFFER_SIZE;
+    if (buf->count < LOG_BUFFER_SIZE) buf->count++;
+}
+
+//Boucle de control moteur
+void motor_control_task(void *pvParam){
+    controller_ctx_t* ctx=(controller_ctx_t*)pvParam;
+  
+    // uint16_t check_roll=0;
+    struct timeval last_time;
+    gettimeofday(&last_time, NULL); // Init du timer
+    ESP_LOGI(TAG, "In beginning of control motor task, running of driver is : %d",ctx->one_driver.running);
+
+    while(1){
+        if(xSemaphoreTake(ctx->ctrl_sync_sem, pdMS_TO_TICKS(50))!=pdTRUE){
+            if(!mpu_reader_is_connected(ctx->my_reader)){
+                ESP_LOGI(TAG, "Lost connection with accelerometer... Exiting motor control task");
+                ctrl_event_msg_t new_event = { .type = EV_LOST_MPU, .err_code = ESP_OK, .msg=""};
+                xQueueSend(ctx->ctrl_event_queue, &new_event,(TickType_t) 2);
+                break;
+            }
+            continue;
+        }
+        float roll;
+        float roll_speed;
+
+        taskENTER_CRITICAL(&mpu_lock);
+        roll=ctx->mpu_val.kalman_filter.xk[0]; // Use Kalman filter roll angle
+        roll_speed=ctx->mpu_val.kalman_filter.xk[1]; // Use Kalman filter roll speed
+        taskEXIT_CRITICAL(&mpu_lock);
+
+        
+
+        struct timeval now;
+        gettimeofday(&now, NULL);
+        float dt=(float)(now.tv_sec - last_time.tv_sec)+((float)(now.tv_usec - last_time.tv_usec)) / 1000000.0f;
+        last_time=now;
+        
+        //If time difference is too small or too big, skip this loop iteration  
+        if(dt<=0.0f || dt>0.05f){continue;}
+        
+        
+        // float mot_speed_dt=0.0f;
+        
+        if (roll <= LOW_THRESH_ROLL || roll >= HIGH_THRESH_ROLL) {
+            drv8825_stop(&ctx->one_driver);
+            ESP_LOGI(TAG, "Robot Lying ... Exiting motor control task");
+            ctrl_event_msg_t event = {.type = EV_STOP_BALANCING,.err_code = ESP_OK, .msg = ""};
+            xQueueSend(ctx->ctrl_event_queue, &event, 0);
+            break;
+        }
+        float err = roll-(float)ctx->target_angle; // Calculate error based on target angle
+        float command=pid_kal_compute(&ctx->pid_controller, err, - roll_speed, dt);
+
+        command = fminf(fmaxf(command, -MAX_PID), MAX_PID);
+
+        drv8825_set_target_speed(&ctx->one_driver, command);
+        drv8825_update(&ctx->one_driver, dt);
+
+    
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    vTaskDelete(NULL);
+}
+
+// Handler prototype
+ //Functions processing a state
+typedef ctrl_state_t (*ctrl_state_func_t)(controller_ctx_t*, ctrl_event_msg_t*);
+
+typedef struct {
+    ctrl_state_t state;
+    ctrl_state_func_t handler;
+} ctrl_state_handler_t;
+
+
+//State handlers for each state
+static ctrl_state_t ctrl_state_init(controller_ctx_t* ctx, ctrl_event_msg_t* event){
+        ESP_LOGI(TAG, "State CTRL_INIT, Event :  %s", ctrl_event_to_str(event->type));
+        ctrl_state_t next_state = CTRL_INIT;
+        ctrl_event_msg_t new_event = { .type = EV_INIT_DONE, .err_code = ESP_OK, .msg=""};
+    switch (event->type) {
+        case EV_INIT:
+            // Initialisation du contexte, des ressources, etc.
+            ESP_LOGI(TAG, "Initialisation des ressources...");
+            // Créer la queue d'événements si pas déjà créée
+            if (ctx->ctrl_event_queue == NULL) {
+                ctx->ctrl_event_queue= xQueueCreate(CTRL_QUEUE_SIZE, sizeof(ctrl_event_msg_t));
+            }
+            //If no queue, don't send an event and straight to ERROR
+            if (!ctx->ctrl_event_queue){
+                ESP_LOGE(TAG, "Failed to create event queue (to store event from controller FSM) in CTRL_INIT");
+                next_state = CTRL_ERROR;
+                break;
+            } 
+            // Initialisation des ressources
+                // capteur mpu6050...
+            i2c_init();
+            ctx->my_reader =mpu_reader_create();
+            if (!ctx->my_reader) {
+                new_event = (ctrl_event_msg_t){EV_ERROR, ESP_ERR_INVALID_ARG, "In CTRL_INIT, failed to initialize MPU reader"};
+                next_state = CTRL_ERROR;
+                break;
+            } 
+
+            //Create Semaphore for synchronized access to output values
+            ctx->ctrl_sync_sem=xSemaphoreCreateBinary();
+            if(!ctx->ctrl_sync_sem){
+                new_event = (ctrl_event_msg_t){EV_ERROR, ESP_ERR_INVALID_ARG, "In CTRL_INIT, failed to create MPU semaphore"};
+                next_state = CTRL_ERROR;
+            }
+            esp_err_t ret=mpu_reader_set_output_buffer(ctx->my_reader, &ctx->mpu_val,  &ctx->ctrl_sync_sem, &mpu_lock);
+            if (ret!=ESP_OK) {
+                new_event = (ctrl_event_msg_t){EV_ERROR, ESP_ERR_INVALID_ARG, "In CTRL_INIT, failed to initialize MPU reader"};
+                next_state = CTRL_ERROR;
+                break;
+            }
+
+            //init target angle
+            ctx->target_angle=TARGET_ANGLE;
+
+            //Init pid - See defines to adjust Kp, Ki and Kd of pid controler
+            pid_init(&ctx->pid_controller, Kp, Ki, Kd);   
+            
+            //Motor init 
+            ret = drv8825_init(&ctx->one_driver, MAX_ACCEL, GPIO_STEP, GPIO_DIR, GPIO_UNUSED, GPIO_UNUSED);
+            if (ret!=ESP_OK) {
+                new_event = (ctrl_event_msg_t){EV_ERROR, ESP_ERR_INVALID_ARG, "In CTRL_INIT, failed to initialize motor driver drv8825"};
+                next_state = CTRL_ERROR;
+                break;
+            }
+                // leds
+            led_rgb_init(&ctx->leds);    
+            ctx->leds.led_rgb_queue=xQueueCreate(CTRL_QUEUE_SIZE, sizeof(rgb_t));
+            if (!ctx->leds.led_rgb_queue) {
+                new_event = (ctrl_event_msg_t){EV_ERROR, ESP_ERR_NO_MEM, "In CTRL_INIT, Failed to create LED RGB queue"};
+                next_state = CTRL_ERROR;
+                break;
+            }
+                //Timer to send delayed events
+            ctx->my_timer_context.timer_event_queue=ctx->ctrl_event_queue;
+            new_event = (ctrl_event_msg_t){EV_INIT_DONE, ret, NULL}; // Set the event to start
+            next_state = CTRL_CONFIG;      
+
+            break;
+
+        default:
+            snprintf(msg_buf, sizeof(msg_buf), "Unexpected event in CTRL_INIT state: %s", ctrl_event_to_str(event->type));
+            new_event = (ctrl_event_msg_t){EV_ERROR, ESP_ERR_INVALID_STATE, msg_buf}; // Set the event to start
+            next_state = CTRL_ERROR;
+            break;
+    }
+                
+    // Envoi l'événement "init terminé"
+    if(ctx->ctrl_event_queue){
+        xQueueSend(ctx->ctrl_event_queue, &new_event, 0);
+    }
+
+    return next_state;
+}
+
+
+static ctrl_state_t ctrl_state_config(controller_ctx_t* ctx, ctrl_event_msg_t* event){
+    ESP_LOGI(TAG, "State CTRL_CONFIG, configuration of MPU6050... Event : %s", ctrl_event_to_str(event->type));
+    ctrl_state_t next_state = CTRL_MPU_CALIBRATION;
+    ctrl_event_msg_t new_event = { .type = EV_CONFIG_DONE, .err_code = ESP_OK, .msg=""};
+    switch(event->type) {   
+        case EV_INIT_DONE:
+
+            //Create led blink task
+            BaseType_t ret=xTaskCreate(led_rgb_task, "led_task", 2048, &ctx->leds, 5, &ctx->leds.led_task);
+            if (ret != pdPASS) {
+                    new_event = (ctrl_event_msg_t){EV_ERROR, ESP_ERR_NO_MEM, "In CTRL_CONFIG, Failed to create LED RGB Task"};
+                    next_state = CTRL_ERROR;
+                    xQueueSend(ctx->ctrl_event_queue, &new_event,(TickType_t) 2);
+                    break;
+            }
+
+            // Set initial color
+            if(xQueueSend(ctx->leds.led_rgb_queue, &init_col, (TickType_t) 2)!= pdPASS ){
+                new_event = (ctrl_event_msg_t){EV_ERROR, ESP_ERR_INVALID_RESPONSE, "In CTRL_CONFIG, Failed to send color to LED RGB Queue"};
+                next_state = CTRL_ERROR;
+                xQueueSend(ctx->ctrl_event_queue, &new_event,(TickType_t) 2);
+                break;
+            }
+
+            next_state = CTRL_MPU_CALIBRATION;
+            ctx->my_timer_context.event_to_send=(ctrl_event_msg_t){EV_CONFIG_DONE, ESP_OK, NULL}; // Set the event to send when the timer expires
+            // Start the timer for LED to blink for 5 seconds
+            esp_err_t tmr_start = timer_ctrl_start(ctx->my_timer_context, 5000, NULL);
+            if(tmr_start!=ESP_OK){
+                 new_event = (ctrl_event_msg_t){EV_ERROR, ESP_ERR_INVALID_RESPONSE, "In CTRL_CONFIG, Failed to start the timer..."};
+                next_state = CTRL_ERROR;
+                xQueueSend(ctx->ctrl_event_queue, &new_event,(TickType_t) 2);
+                break;
+            }
+            break;
+
+        default:
+            snprintf(msg_buf, sizeof(msg_buf), "Unexpected event in CTRL_CONFIG state: %s", ctrl_event_to_str(event->type));
+            new_event = (ctrl_event_msg_t){EV_ERROR, ESP_ERR_INVALID_STATE, msg_buf}; // Set the event to start
+            next_state = CTRL_ERROR;
+            xQueueSend(ctx->ctrl_event_queue, &new_event,(TickType_t) 2);
+            break;
+    }
+          
+    return next_state;
+}
+
+static ctrl_state_t ctrl_state_calib_mpu(controller_ctx_t* ctx, ctrl_event_msg_t* event){
+    ESP_LOGI(TAG, "State CTRL_MPU_CALIBRATION, calibration of MPU6050.., Event : %s", ctrl_event_to_str(event->type));
+    ctrl_state_t next_state = CTRL_START_MPU;
+    ctrl_event_msg_t new_event = { .type = EV_CALIB_DONE, .err_code = ESP_OK, .msg=""};
+    switch(event->type) {
+        case EV_CONFIG_DONE:
+            //Calibrate and configurte mpu_6050
+            mpu_config_t mpu_config = {
+                .gyro = GYRO_CALIBRATE, // Gyroscope calibration mode
+                .acce_fs = ACCE_FS_8G, // Accelerometer full scale range
+                .gyro_fs = GYRO_FS_500DPS, // Gyroscope full scale range
+                .sampling_config = {
+                    .smplrt_div = 4, // No division, full sampling rate
+                    .dlpf_cfg = MPU6050_DLPF_BW_20HZ // Low-pass filter bandwidth of 42 Hz
+                }
+            };
+            esp_err_t ret = mpu_reader_config(ctx->my_reader, &mpu_config);
+            if(ret != ESP_OK) {
+                new_event = (ctrl_event_msg_t){EV_ERROR, ret, "State CALIB_MPU, Failed to configure MPU6050"};
+                next_state = CTRL_ERROR;
+                break;
+            }
+
+            // Configure interrupts
+            ret = mpu_reader_int_config(ctx->my_reader, GPIO_MPU_INT,FIFO_SOURCE_GYRO_ACC );
+            if( ret != ESP_OK) {
+                new_event = (ctrl_event_msg_t){EV_ERROR, ret, "State CALIB_MPU, Failed to configure interrupts on MPU6050"};
+                next_state = CTRL_ERROR;
+                break;
+            }
+            
+            new_event = (ctrl_event_msg_t){EV_CALIB_DONE, ret, NULL};
+            next_state = CTRL_START_MPU;
+            break;
+        default:
+            snprintf(msg_buf, sizeof(msg_buf), "Unexpected event in CTRL_CALIB_MPU state: %s", ctrl_event_to_str(event->type));
+            new_event = (ctrl_event_msg_t){EV_ERROR, ESP_ERR_INVALID_STATE, msg_buf}; // Set the event to start
+            next_state = CTRL_ERROR;
+            break;   
+    }
+    xQueueSend(ctx->ctrl_event_queue, &new_event, (TickType_t) 2);
+    return next_state;
+}
+
+static ctrl_state_t ctrl_state_start_mpu(controller_ctx_t* ctx, ctrl_event_msg_t* event){
+    ctrl_state_t next_state = CTRL_START_MPU;
+    ctrl_event_msg_t new_event = { .type = EV_START_BALANCE, .err_code = ESP_OK, .msg=""};
+    esp_err_t ret;
+    switch(event->type) {
+        case EV_ROBOT_LYING: 
+            xQueueSend(ctx->leds.led_rgb_queue, &config_col, (TickType_t) 2); // Set config color (orange)
+            next_state = CTRL_START_MPU; // Stay in the same state to wait for MPU data 
+            new_event = (ctrl_event_msg_t){EV_MPU_STARTED, ESP_OK, NULL};
+            xQueueSend(ctx->ctrl_event_queue, &new_event, (TickType_t) 2);
+            break;
+        case EV_CALIB_DONE:
+            ESP_LOGI(TAG, "State CTRL_START_MPU, Start task for MPU6050.., Event : %s", ctrl_event_to_str(event->type));
+            //Set LED color to Orange (config_col)
+            if(xQueueSend(ctx->leds.led_rgb_queue, &config_col, (TickType_t) 2)!= pdPASS ){
+                new_event = (ctrl_event_msg_t){EV_ERROR, ESP_ERR_INVALID_RESPONSE, "In CTRL_CONFIG, Failed to send color to LED RGB Queue"};
+                next_state = CTRL_ERROR;
+                break;
+            }
+            //Start reader and its tasks
+            if (!ctx->my_reader) {
+                new_event = (ctrl_event_msg_t){EV_ERROR, ESP_ERR_INVALID_STATE, "In CTRL_START_MPU, MPU reader not initialized"};
+                next_state = CTRL_ERROR;
+                break;
+            }
+            ret= mpu_reader_start(ctx->my_reader);
+            if (ret != ESP_OK) {
+                new_event = (ctrl_event_msg_t){EV_ERROR, ret, "In CTRL_START_MPU Failed to start MPU reader"};
+                next_state = CTRL_ERROR;
+            } 
+            new_event = (ctrl_event_msg_t){EV_MPU_STARTED, ESP_OK, NULL}; // Set the event to start
+            next_state = CTRL_START_MPU;
+            xQueueSend(ctx->ctrl_event_queue, &new_event, (TickType_t) 2);
+            break;
+        case EV_MPU_STARTED:
+            ESP_LOGI(TAG, "MPU reader started successfully");
+            next_state = CTRL_START_MPU; // Stay in the same state to wait for MPU data 
+            new_event = (ctrl_event_msg_t){EV_MPU_DATA_READY, ESP_OK, NULL }; // Set the event to start
+            xQueueSend(ctx->ctrl_event_queue, &new_event, (TickType_t) 2);
+            //Start timer to stop the FSM in case robot stays on the ground for more than 30s
+            ctx->my_timer_context.event_to_send=(ctrl_event_msg_t){EV_ERROR, ESP_OK, "Timeout on Start_MPU"}; // Set the event to send when the timer expires
+            timer_ctrl_start(ctx->my_timer_context, 30000, &ctx->my_timer);
+            break;
+        case EV_MPU_DATA_READY:
+            uint32_t start_ver=0, end_ver=0;
+            float roll=0, pitch=0;
+            if(!mpu_reader_is_connected(ctx->my_reader)){
+                next_state = CTRL_LOST_MPU;
+                new_event = (ctrl_event_msg_t){EV_LOST_MPU, ESP_FAIL, "In CTRL_START_MPU Failed to connect to MPU reader"};
+                xQueueSend(ctx->ctrl_event_queue, &new_event, (TickType_t) 5);
+                break;
+            } 
+            //Restart counter of reconnection attempts
+            ctx->mpu_task_counter=0;
+            if(xSemaphoreTake(ctx->ctrl_sync_sem, pdMS_TO_TICKS(20))==pdTRUE){
+                taskENTER_CRITICAL(&mpu_lock);
+                start_ver = ctx->mpu_val.version;
+                roll = ctx->mpu_val.kalman_filter.xk[0]; // Use Kalman filter roll angle
+                end_ver = ctx->mpu_val.version;
+                taskEXIT_CRITICAL(&mpu_lock);
+                ESP_LOGI(TAG, "Output buffer updated, version: %lu", (long unsigned int)end_ver);
+                
+                if((start_ver != end_ver) || (start_ver & 1)){
+                    new_event = (ctrl_event_msg_t){EV_MPU_DATA_READY, ESP_OK, NULL}; // Set the event to start
+                    next_state =CTRL_START_MPU;
+                    xQueueSend(ctx->ctrl_event_queue, &new_event, (TickType_t) 2);
+                    break;
+                }
+                ctx->version_read=end_ver;
+            }
+
+            if(roll > LOW_THRESH_ROLL && roll < HIGH_THRESH_ROLL){
+                timer_ctrl_cancel(ctx->my_timer);
+                ESP_LOGI(TAG, "Thershold over 20° Roll : %.2f, Pitch %.2f", roll, pitch);
+                new_event = (ctrl_event_msg_t){EV_START_BALANCE, ESP_OK, NULL}; // Set the event to start
+                next_state =CTRL_BALANCING;
+                //TODO: Instrad, launch the event with a delay (i.e. 300ms) to let the MPU reader update the values
+                xQueueSend(ctx->ctrl_event_queue, &new_event, (TickType_t) 2);
+                break;
+            } 
+
+            next_state = CTRL_START_MPU;
+            ctx->my_timer_context.event_to_send=(ctrl_event_msg_t){EV_MPU_DATA_READY, ESP_OK, NULL}; // Set the event to send when the timer expires
+            ret = timer_ctrl_start(ctx->my_timer_context, 1000, NULL);
+            if(ret!=ESP_OK){
+                new_event = (ctrl_event_msg_t){EV_ERROR, ESP_ERR_INVALID_RESPONSE, "In CTRL_CONFIG, Failed to start the timer..."};
+                next_state = CTRL_ERROR;
+                xQueueSend(ctx->ctrl_event_queue, &new_event,(TickType_t) 2);
+                break;
+            }
+        break;
+
+        default:
+            snprintf(msg_buf, sizeof(msg_buf), "Unexpected event in CTRL_START_MPU state: %s", ctrl_event_to_str(event->type));
+            new_event = (ctrl_event_msg_t){EV_ERROR, ESP_ERR_INVALID_STATE, msg_buf }; // Set the event to start
+            next_state = CTRL_ERROR;
+            xQueueSend(ctx->ctrl_event_queue, &new_event, (TickType_t) 2);
+        break;
+    }             
+    return next_state;
+}
+
+static ctrl_state_t ctrl_state_lost_mpu(controller_ctx_t* ctx, ctrl_event_msg_t* event){
+    ctrl_state_t next_state = CTRL_START_MPU;
+    ctrl_event_msg_t new_event = { .type = EV_START_BALANCE, .err_code = ESP_OK, .msg=""};
+    esp_err_t ret;
+    switch(event->type) {
+        case  EV_LOST_MPU:
+                next_state = CTRL_START_MPU;
+                ret=mpu_reader_resume(ctx->my_reader);
+                if(ret!=ESP_OK){
+                    new_event = (ctrl_event_msg_t){EV_ERROR, ret, "In CTRL_START_MPU Failed to restart MPU reader"};
+                    next_state = CTRL_ERROR;
+                    xQueueSend(ctx->ctrl_event_queue, &new_event, (TickType_t) 5);
+                    break;
+                }
+
+                ctx->mpu_task_counter++;
+                if(ctx->mpu_task_counter==MAX_MPU_RESTART){
+                    new_event = (ctrl_event_msg_t){EV_ERROR, ret, "In CTRL_START_MPU Failed to restart MPU reader"};
+                    next_state = CTRL_ERROR;
+                    xQueueSend(ctx->ctrl_event_queue, &new_event, (TickType_t) 5);
+                    break;
+                }
+
+
+                // Start the timer to give time to reconnect 1 second
+                ctx->my_timer_context.event_to_send=(ctrl_event_msg_t){EV_MPU_DATA_READY, ESP_OK, NULL}; // Set the event to send when the timer expires
+                ret = timer_ctrl_start(ctx->my_timer_context, 1000, NULL);
+                if(ret!=ESP_OK){
+                    new_event = (ctrl_event_msg_t){EV_ERROR, ESP_ERR_INVALID_RESPONSE, "In CTRL_CONFIG, Failed to start the timer..."};
+                    next_state = CTRL_ERROR;
+                    xQueueSend(ctx->ctrl_event_queue, &new_event,(TickType_t) 2);
+                    break;
+                }
+            break;
+
+        default:
+            snprintf(msg_buf, sizeof(msg_buf), "Unexpected event in CTRL_LOST_MPU state: %s", ctrl_event_to_str(event->type));
+            new_event = (ctrl_event_msg_t){EV_ERROR, ESP_ERR_INVALID_STATE, msg_buf }; // Set the event to start
+            next_state = CTRL_ERROR;
+            xQueueSend(ctx->ctrl_event_queue, &new_event, (TickType_t) 2);
+            break;
+        }
+        return next_state;
+
+}
+
+
+static ctrl_state_t ctrl_state_balancing(controller_ctx_t* ctx, ctrl_event_msg_t* event){
+    ctrl_event_msg_t new_event={.type=EV_NONE, .err_code=ESP_OK, .msg=NULL};
+    ctrl_state_t next_state = CTRL_BALANCING;
+
+     switch(event->type) {
+        case EV_START_BALANCE:
+            xQueueSend(ctx->leds.led_rgb_queue, &ready_col, (TickType_t) 2); 
+            ESP_LOGI(TAG, "State CTRL_BALANCING, Apply speed to motor, Event : %s", ctrl_event_to_str(event->type));
+            next_state=CTRL_BALANCING;
+            //TODO Deal with error from start method
+            ESP_ERROR_CHECK(drv8825_start(&ctx->one_driver));
+            xTaskCreate(motor_control_task, "controller_task", 4096, ctx, 10, NULL);
+            break;
+        case EV_STOP_BALANCING:
+            next_state = CTRL_START_MPU;
+            new_event = (ctrl_event_msg_t){EV_ROBOT_LYING, ESP_OK, NULL};
+            log_ctrl_print(&log_buffer);
+            log_buffer.index = 0; // Reset index after printing
+            log_buffer.count = 0; // Reset count after printing
+    
+            //TODO Deal with error from stop method
+            drv8825_stop(&ctx->one_driver);
+            xQueueSend(ctx->ctrl_event_queue, &new_event, (TickType_t) 2);
+            
+            break;
+
+        case EV_LOST_MPU:
+            next_state = CTRL_LOST_MPU;
+            new_event = (ctrl_event_msg_t){EV_LOST_MPU, ESP_OK, NULL};
+            //TODO Deal with error from stop method
+            drv8825_stop(&ctx->one_driver);
+            xQueueSend(ctx->ctrl_event_queue, &new_event, (TickType_t) 2);
+            break;
+
+        default:
+            snprintf(msg_buf, sizeof(msg_buf), "Unexpected event in CTRL_NEW_MEASUREMNT state: %s", ctrl_event_to_str(event->type));
+            new_event = (ctrl_event_msg_t){EV_ERROR, ESP_ERR_INVALID_STATE, msg_buf };
+            next_state = CTRL_ERROR;
+            xQueueSend(ctx->ctrl_event_queue, &new_event, (TickType_t) 2);
+            break;
+    }
+    return next_state;
+}
+
+//TODO : prepare API to gather commands in Bluetooth from external device, modify INIT_STATE to start Bluetooth "listener"
+static ctrl_state_t ctrl_state_remote_control(controller_ctx_t* ctx, ctrl_event_msg_t* event){
+    return CTRL_STOP;
+}
+
+static ctrl_state_t ctrl_state_error(controller_ctx_t* ctx, ctrl_event_msg_t* event){
+    ESP_LOGE(TAG, "Error occurred!");
+    ctrl_state_t next_state = CTRL_STOP;
+    // Handle error state
+    switch(event->type) {
+        case EV_ERROR:
+            if (event->err_code != ESP_OK) {
+                ESP_LOGE(TAG, "Error code: %s, %s", esp_err_to_name(event->err_code), event->msg ? event->msg : "No message");
+            } else {
+                ESP_LOGE(TAG, "An error event occurred with error code : %s", esp_err_to_name(event->err_code));
+            }
+            break;
+        default:
+            ESP_LOGE(TAG, "Unexpected event in CTRL_ERROR state: %s", ctrl_event_to_str(event->type));
+            break;
+    }
+    xQueueSend(ctx->leds.led_rgb_queue, &error_col, (TickType_t) 2); // Set error color purple
+    
+    ctx->my_timer_context.event_to_send=(ctrl_event_msg_t){EV_STOP, ESP_OK, NULL}; // Set the event to send when the timer expires
+    esp_err_t  ret = timer_ctrl_start(ctx->my_timer_context, 8000, NULL);
+    if(ret!=ESP_OK){
+        ctrl_event_msg_t new_event=(ctrl_event_msg_t){EV_STOP, ret, NULL};
+        xQueueSend(ctx->ctrl_event_queue, &new_event, (TickType_t) 5);
+    }
+
+    //xTimerStart(ctx->my_timer,0); // Start the timer for LED to blink for 5 seconds
+    return next_state;
+}
+
+static ctrl_state_t ctrl_state_stop(controller_ctx_t* ctx, ctrl_event_msg_t* event){
+
+     ctrl_state_t next_state = CTRL_STOP;
+    if(event->type == EV_STOP){
+        ESP_LOGI(TAG, "Stopping controller...");
+             //Free the reader's memory
+        if (ctx->my_reader) {
+            mpu_reader_stop(ctx->my_reader); // Stop the MPU reader
+            if(ctx->ctrl_event_queue){
+                ESP_LOGI(TAG, "Deleting user queue...");
+                vQueueDelete(ctx->ctrl_event_queue); // Delete the user queue
+                ctx->ctrl_event_queue =NULL; 
+            }
+            
+            ctx->my_reader = NULL; // Clear the pointer
+        } else {
+            free(ctx->my_reader); // Free the memory if my_reader is NULL
+        }
+
+        //DeInit motor controller
+        //TODO Deal with error from deinit method
+        //Deinit stops and deinit pointers
+         drv8825_deinit(&ctx->one_driver);
+
+        //Stops the leds
+        ctx->leds.running = false; // Set the LED task running flag to false
+        vTaskDelay(pdMS_TO_TICKS(1000)); // Delay to ensure the LED task stops
+
+        //Stops the TImer
+        timer_ctrl_stop_all();
+        ctx->my_timer = NULL; // Clear the timer pointer
+        ESP_LOGI(TAG, "Controller stopped.");
+    
+        next_state= CTRL_EXIT;
+    }
+    return next_state;
+}
+
+
+static const ctrl_state_handler_t state_handlers[] = {
+    { CTRL_INIT,           ctrl_state_init },
+    { CTRL_CONFIG,         ctrl_state_config },
+    { CTRL_MPU_CALIBRATION, ctrl_state_calib_mpu},
+    { CTRL_START_MPU,      ctrl_state_start_mpu },
+    { CTRL_LOST_MPU,        ctrl_state_lost_mpu},
+    //{ CTRL_BALANCING_INIT,      ctrl_state_balancing_init},
+    //{ CTRL_NEW_MEASUREMENT, ctrl_state_new_meas},
+    { CTRL_BALANCING, ctrl_state_balancing},
+    { CTRL_REMOTE_CONTROL, ctrl_state_remote_control},
+    { CTRL_ERROR,          ctrl_state_error },
+    { CTRL_STOP,           ctrl_state_stop },
+    // Ajoute tes autres états ici
+};
+
+#define NUM_HANDLERS (sizeof(state_handlers)/sizeof(state_handlers[0]))
+
+// === 6. Boucle principale de la FSM ===
+
+void controller_task(void *pvParam){
+    controller_ctx_t ctx = {0}; // Zero-initialisation
+
+    // Initialiser le contexte ici si besoin (queues, etc.)
+    ctx.ctrl_event_queue = xQueueCreate(CTRL_QUEUE_SIZE, sizeof(ctrl_event_msg_t));
+    ctrl_state_t state = CTRL_INIT;
+    ctrl_event_msg_t event = {EV_INIT, ESP_OK, NULL};
+    xQueueSend(ctx.ctrl_event_queue, &event, portMAX_DELAY);
+
+
+
+    while(1) {
+        // Attendre un événement
+        xQueueReceive(ctx.ctrl_event_queue, &event, portMAX_DELAY);
+         bool handled = false;
+        // Chercher et appeler le bon handler d'état
+                  
+            for (size_t i=0; i<NUM_HANDLERS; ++i) {
+                if (state_handlers[i].state == state) {
+                    state = state_handlers[i].handler(&ctx, &event);
+                    handled = true;
+                    break;
+                }
+            }
+            if (!handled) {
+                ESP_LOGE(TAG, "Etat inconnu: %d", state);
+                state = CTRL_ERROR;
+            }
+            if (state == CTRL_EXIT) {
+                ESP_LOGI(TAG, "FSM terminé, suppression de la tâche...");
+                break; // quitte le while(1)
+            }
+
+    }
+    vTaskDelete(NULL);
+}
+
