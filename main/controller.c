@@ -12,11 +12,15 @@
 #include "mpu_reader.h"
 #include "led_rgb.h"
 #include "drv8825.h"
-#include "controller.h"
-#include "controller_events.h"
+
 
 #include "pid.h"
 #include "kalmanfilter.h"
+
+#include "controller.h"
+#include "controller_events.h"
+#include "balance_control.h"
+#include "timer_controller.h"
 
 
 #define CTRL_QUEUE_SIZE 32 // Size of the queue for MPU6050 data frames
@@ -51,22 +55,13 @@ typedef enum {
 
 // STRUCTURE OF GLOBAL CONTEXT
     typedef struct {
-        float kp;
-        float ki;
-        float kd;
-        float target_angle;
-        float max_output;
-        float max_accel;
-    } control_config_t;
-
-    typedef struct {
         QueueHandle_t ctrl_event_queue; //OK on init
         TimerHandle_t my_timer; //OK on int
         timer_event_context_t my_timer_context;//OK on init
 
         led_rgb_t leds;
 
-        my_pid_t pid_controller;//OK on init
+        balance_control_t balance_control;
 
         drv8825_t one_driver;
 
@@ -75,10 +70,6 @@ typedef enum {
         SemaphoreHandle_t ctrl_sync_sem; //OK on init
         mpu_values_t mpu_val;
         uint32_t version_read; 
-        uint16_t target_angle;   
-
-        SemaphoreHandle_t config_mutex;
-        control_config_t config;
     } controller_ctx_t;
     //Led colors for states 
     rgb_t init_col={64, 0,0}; // Initial color for LED RGB
@@ -167,10 +158,7 @@ void motor_control_task(void *pvParam){
             xQueueSend(ctx->ctrl_event_queue, &event, 0);
             break;
         }
-        float err = roll-(float)ctx->target_angle; // Calculate error based on target angle
-        float command=pid_kal_compute(&ctx->pid_controller, err, - roll_speed, dt);
-
-        command = fminf(fmaxf(command, -MAX_PID), MAX_PID);
+        float command=balance_control_compute(&ctx->balance_control, roll, roll_speed, dt);
 
         drv8825_set_target_speed(&ctx->one_driver, command);
         drv8825_update(&ctx->one_driver, dt);
@@ -233,11 +221,9 @@ static ctrl_state_t ctrl_state_init(controller_ctx_t* ctx, ctrl_event_msg_t* eve
                 break;
             }
 
-            //init target angle
-            ctx->target_angle=TARGET_ANGLE;
 
-            //Init pid - See defines to adjust Kp, Ki and Kd of pid controler
-            pid_init(&ctx->pid_controller, Kp, Ki, Kd);   
+            //Init balancing - See defines to adjust Kp, Ki and Kd of pid controler
+            balance_control_init(&ctx->balance_control, Kp, Ki, Kd, TARGET_ANGLE, MAX_PID);   
             
             //Motor init 
             ret = drv8825_init(&ctx->one_driver, MAX_ACCEL, GPIO_STEP, GPIO_DIR, GPIO_UNUSED, GPIO_UNUSED);
