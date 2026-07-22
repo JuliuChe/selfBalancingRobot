@@ -1,8 +1,6 @@
 #include "timer_controller.h"
 #include <string.h>
-#include "esp_err.h"
-#include "esp_log.h"
-#include "controller.h"  // Pour ctrl_event_msg_t
+
 
 static const char* TAG = "TIMER";
 
@@ -10,7 +8,7 @@ static TimerHandle_t timers[MAX_TIMERS] = { NULL };
 
 static void timer_callback(TimerHandle_t xTimer) {
 
-    controller_timer_context_t *ctx = (controller_timer_context_t *) pvTimerGetTimerID(xTimer);
+    timer_event_context_t *ctx = (timer_event_context_t *) pvTimerGetTimerID(xTimer);
 
     if (ctx != NULL) {
         ESP_LOGI(TAG, "Sending event from timer controller: %s", ctrl_event_to_str(ctx->event_to_send.type));
@@ -28,15 +26,15 @@ static void timer_callback(TimerHandle_t xTimer) {
     xTimerDelete(xTimer, 0);
 }
 
-esp_err_t timer_ctrl_start(controller_timer_context_t ctx, uint32_t timeout_ms, TimerHandle_t* out_timer) {
+esp_err_t timer_ctrl_start(timer_event_context_t ctx, uint32_t timeout_ms, TimerHandle_t* out_timer) {
     if (!ctx.timer_event_queue) return ESP_ERR_INVALID_ARG;
 
 
     for (int i = 0; i < MAX_TIMERS; i++) {
         if (timers[i] == NULL) {
-            controller_timer_context_t* msg = malloc(sizeof(controller_timer_context_t));
+            timer_event_context_t* msg = malloc(sizeof(timer_event_context_t));
             if (!msg) return ESP_ERR_NO_MEM;
-            memcpy(msg, &ctx, sizeof(controller_timer_context_t));
+            memcpy(msg, &ctx, sizeof(timer_event_context_t));
 
             TimerHandle_t timer = xTimerCreate("timer_ctrl__t", pdMS_TO_TICKS(timeout_ms), pdFALSE, msg, timer_callback);
             if (!timer) {
@@ -67,7 +65,7 @@ esp_err_t timer_ctrl_cancel(TimerHandle_t timer) {
         if (timers[i] == timer) {
             timers[i] = NULL;
             xTimerStop(timer, 0);
-            controller_timer_context_t* ev = (controller_timer_context_t*) pvTimerGetTimerID(timer);
+            timer_event_context_t* ev = (timer_event_context_t*) pvTimerGetTimerID(timer);
             free(ev);
             xTimerDelete(timer, 0);
             return ESP_OK;
@@ -81,7 +79,7 @@ esp_err_t timer_ctrl_stop_all() {
     for (int i = 0; i < MAX_TIMERS; i++) {
         if (timers[i] != NULL) {
             xTimerStop(timers[i], 0);
-            controller_timer_context_t* ev = (controller_timer_context_t*) pvTimerGetTimerID(timers[i]);
+            timer_event_context_t* ev = (timer_event_context_t*) pvTimerGetTimerID(timers[i]);
             free(ev);
             xTimerDelete(timers[i], 0);
             timers[i] = NULL;

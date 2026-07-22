@@ -1,17 +1,22 @@
 
 #ifndef TIMER_CONTROLLER
 #define TIMER_CONTROLLER
+#include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/timers.h"
-#include "esp_err.h"
-#include "freertos/timers.h"
-#include "controller.h"
+#include "freertos/queue.h"
+#include "controller_events.h"
 
 #include "esp_log.h"
 
 #define MAX_TIMERS 10  // Choisis un maximum arbitraire
+typedef struct{
+    QueueHandle_t timer_event_queue;
+    ctrl_event_msg_t event_to_send;
+} timer_event_context_t;
 
-esp_err_t timer_ctrl_start(controller_timer_context_t ctx, uint32_t timeout_ms, TimerHandle_t* out_timer);
+
+esp_err_t timer_ctrl_start(timer_event_context_t ctx, uint32_t timeout_ms, TimerHandle_t* out_timer);
 esp_err_t timer_ctrl_cancel(TimerHandle_t timer);
 esp_err_t timer_ctrl_stop_all();
 

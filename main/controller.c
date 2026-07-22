@@ -13,7 +13,8 @@
 #include "led_rgb.h"
 #include "drv8825.h"
 #include "controller.h"
-#include "timer_controller.h"
+#include "controller_events.h"
+
 #include "pid.h"
 #include "kalmanfilter.h"
 
@@ -49,6 +50,36 @@ typedef enum {
 
 
 // STRUCTURE OF GLOBAL CONTEXT
+    typedef struct {
+        float kp;
+        float ki;
+        float kd;
+        float target_angle;
+        float max_output;
+        float max_accel;
+    } control_config_t;
+
+    typedef struct {
+        QueueHandle_t ctrl_event_queue; //OK on init
+        TimerHandle_t my_timer; //OK on int
+        timer_event_context_t my_timer_context;//OK on init
+
+        led_rgb_t leds;
+
+        my_pid_t pid_controller;//OK on init
+
+        drv8825_t one_driver;
+
+        mpu_reader_t *my_reader; //OK on init
+        uint8_t mpu_task_counter;
+        SemaphoreHandle_t ctrl_sync_sem; //OK on init
+        mpu_values_t mpu_val;
+        uint32_t version_read; 
+        uint16_t target_angle;   
+
+        SemaphoreHandle_t config_mutex;
+        control_config_t config;
+    } controller_ctx_t;
     //Led colors for states 
     rgb_t init_col={64, 0,0}; // Initial color for LED RGB
     rgb_t config_col={85, 25,0}; // Color for configuration state

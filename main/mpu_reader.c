@@ -1,6 +1,5 @@
 
 #include "mpu_reader.h"
-#include "controller.h"
 
 
 #include "i2c_devices.h"
