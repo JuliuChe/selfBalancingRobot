@@ -21,21 +21,19 @@
 #include "controller_events.h"
 #include "balance_control.h"
 #include "timer_controller.h"
+#include "robot_config.h"
 
 
 #define CTRL_QUEUE_SIZE 32 // Size of the queue for MPU6050 data frames
-#define LOW_THRESH_ROLL 20 // Threshold for roll angle to trigger balancing
-#define HIGH_THRESH_ROLL 150 // Threshold for roll angle to trigger balancing
 #define MAX_MPU_RESTART 10
-#define GPIO_MPU_INT GPIO_NUM_3
+// #define GPIO_MPU_INT GPIO_NUM_3
 #define TAG "CTRLER"
-#define MAX_ACCEL 5000.0f //was 4000
-#define MAX_PID 1500.0f //was 1100
-#define GPIO_STEP   1
-#define GPIO_DIR    4
-#define Kp 20.0f //was 15.0f was 35.0f was 20.0f
-#define Ki 0.0f //was 0.10f
-#define Kd 1.0f //was 20.0f was 8.5f was 15.0f
+// #define ROBOT_DRIVE_MAX_ACCEL 5000.0f //was 4000
+// #define ROBOT_BALANCE_MAX_OUTPUT 1500.0f //was 1100
+
+// #define ROBOT_PID_KP_DEFAULT 23.0f //was 15.0f was 35.0f was 20.0f
+// #define ROBOT_PID_KI_DEFAULT 0.01f //was 0.10f
+// #define ROBOT_PID_KD_DEFAULT 1.0f //was 20.0f was 8.5f was 15.0f
 #define TARGET_ANGLE 90.0f 
 
 typedef enum {
@@ -151,7 +149,7 @@ void motor_control_task(void *pvParam){
         
         // float mot_speed_dt=0.0f;
         
-        if (roll <= LOW_THRESH_ROLL || roll >= HIGH_THRESH_ROLL) {
+        if (roll <= ROBOT_MIN_BALANCE_ANGLE || roll >= ROBOT_MAX_BALANCE_ANGLE) {
             drv8825_stop(&ctx->one_driver);
             ESP_LOGI(TAG, "Robot Lying ... Exiting motor control task");
             ctrl_event_msg_t event = {.type = EV_STOP_BALANCING,.err_code = ESP_OK, .msg = ""};
@@ -223,10 +221,10 @@ static ctrl_state_t ctrl_state_init(controller_ctx_t* ctx, ctrl_event_msg_t* eve
 
 
             //Init balancing - See defines to adjust Kp, Ki and Kd of pid controler
-            balance_control_init(&ctx->balance_control, Kp, Ki, Kd, TARGET_ANGLE, MAX_PID);   
+            balance_control_init(&ctx->balance_control, ROBOT_PID_KP_DEFAULT, ROBOT_PID_KI_DEFAULT, ROBOT_PID_KD_DEFAULT, TARGET_ANGLE, ROBOT_BALANCE_MAX_OUTPUT);   
             
             //Motor init 
-            ret = drv8825_init(&ctx->one_driver, MAX_ACCEL, GPIO_STEP, GPIO_DIR, GPIO_UNUSED, GPIO_UNUSED);
+            ret = drv8825_init(&ctx->one_driver, ROBOT_DRV8825_MAX_ACCEL, ROBOT_DRV8825_1_GPIO_STEP, ROBOT_DRV8825_1_GPIO_DIR, ROBOT_DRV8825_1_GPIO_SLEEP, ROBOT_DRV8825_1_GPIO_EN);
             if (ret!=ESP_OK) {
                 new_event = (ctrl_event_msg_t){EV_ERROR, ESP_ERR_INVALID_ARG, "In CTRL_INIT, failed to initialize motor driver drv8825"};
                 next_state = CTRL_ERROR;
@@ -334,7 +332,7 @@ static ctrl_state_t ctrl_state_calib_mpu(controller_ctx_t* ctx, ctrl_event_msg_t
             }
 
             // Configure interrupts
-            ret = mpu_reader_int_config(ctx->my_reader, GPIO_MPU_INT,FIFO_SOURCE_GYRO_ACC );
+            ret = mpu_reader_int_config(ctx->my_reader, ROBOT_MPU_INT_PIN,FIFO_SOURCE_GYRO_ACC );
             if( ret != ESP_OK) {
                 new_event = (ctrl_event_msg_t){EV_ERROR, ret, "State CALIB_MPU, Failed to configure interrupts on MPU6050"};
                 next_state = CTRL_ERROR;
@@ -425,7 +423,7 @@ static ctrl_state_t ctrl_state_start_mpu(controller_ctx_t* ctx, ctrl_event_msg_t
                 ctx->version_read=end_ver;
             }
 
-            if(roll > LOW_THRESH_ROLL && roll < HIGH_THRESH_ROLL){
+            if(roll > ROBOT_MIN_BALANCE_ANGLE && roll < ROBOT_MAX_BALANCE_ANGLE){
                 timer_ctrl_cancel(ctx->my_timer);
                 ESP_LOGI(TAG, "Thershold over 20° Roll : %.2f, Pitch %.2f", roll, pitch);
                 new_event = (ctrl_event_msg_t){EV_START_BALANCE, ESP_OK, NULL}; // Set the event to start

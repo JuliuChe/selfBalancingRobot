@@ -5,7 +5,6 @@
 #include "freertos/queue.h"
 #include "kalmanfilter.h"
 
-#define INT_PIN GPIO_NUM_3 // GPIO pin for MPU6050 interrupt (if needed, otherwise can be set to -1)
 #define MPU_FRAME_SIZE 12 // Size of the MPU6050 data frame (6 bytes for accelerometer + 6 bytes for gyroscope)
 
 typedef struct {

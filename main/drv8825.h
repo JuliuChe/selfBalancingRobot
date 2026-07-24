@@ -1,15 +1,21 @@
 #ifndef DRV8825_H
 #define DRV8825_H
 
-#include "driver/mcpwm_prelude.h"
+#include <stdbool.h>
+#include <stdint.h>
+
+#include "esp_err.h"
 #include "driver/gpio.h"
+#include "driver/mcpwm_prelude.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 
 void update_microstepping(float abs_speed);
 
 //New driver
 
-#define GPIO_UNUSED GPIO_NUM_NC 
+
 
 typedef struct{
     
@@ -37,7 +43,7 @@ typedef struct{
     uint8_t current_dir;
     bool direction_initialized;
 
-}drv8825_t;
+} drv8825_t;
 
 //Init Driver step and dir pin are mandatory, sleep and enable are optionals set to GPIO_UNUSED
 esp_err_t drv8825_init(drv8825_t *drv, float max_accel, gpio_num_t step_pin,  gpio_num_t dir_pin, gpio_num_t sleep, gpio_num_t enable);
@@ -54,7 +60,5 @@ bool drv8825_is_running(drv8825_t* drv); //OK
 //TODO Only to test motor control
 void drv8825_sine_task(void *pvParameters);
 
-//TODO : Review this method 
-void drv8825_set_speed(drv8825_t* drv, float pid_output);
 
 #endif

@@ -1,6 +1,6 @@
 
 #include "mpu_reader.h"
-
+#include "robot_config.h"
 
 #include "i2c_devices.h"
 #include "my_i2c.h"
@@ -13,13 +13,16 @@
 
 static const char *TAG = "MPU_READER";
 
-#define MPU_FRAME_SIZE 12 // Size of the MPU6050 data frame (6 bytes for accelerometer + 6 bytes for gyroscope)
-#define QUEUE_SIZE 128  // Size of the queue for MPU6050 data frames
-#define RAD_TO_DEG                  57.29577951f /*!< Radians to degrees */
-#define FIFO_MAX_SIZE 1024 // Maximum size of the FIFO buffer
+// #define MPU_FRAME_SIZE  12 // Size of the MPU6050 data frame (6 bytes for accelerometer + 6 bytes for gyroscope)
+#define FIFO_MAX_SIZE   1024U // Maximum size of the FIFO buffer
+#define PERF_LOG_INTERVAL_SAMPLES 1000U
+
 // Définis un bit pour l’arrêt
-#define MPU_TASK_STOPPED_BIT   (1 << 0)
-#define MPU_PROC_TASK_STOPPED_BIT (1 << 1)
+#define MPU_TASK_STOPPED_BIT   BIT0
+#define MPU_PROC_TASK_STOPPED_BIT BIT1
+
+#define RAD_TO_DEG      57.29577951f /*!< Radians to degrees */
+
 
 static uint32_t counter = 0;
 static uint32_t counter_out =0;
@@ -59,21 +62,21 @@ static size_t get_fifo_frame_size(fifo_sources_t fifo_config) {
     size_t size = 0;
     // Accelerometer : 6 bytes (X, Y, Z)
     if (fifo_config & FIFO_SOURCE_ACCELEROMETER) {
-        size += 6;
+        size += 3U*sizeof(int16_t);
     }
     // Gyro X, Y, Z : 2 bytes chacun
     if (fifo_config & FIFO_SOURCE_GYROSCOPE_X) {
-        size += 2;
+        size += sizeof(int16_t);
     }
     if (fifo_config & FIFO_SOURCE_GYROSCOPE_Y) {
-        size += 2;
+        size += sizeof(int16_t);
     }
     if (fifo_config & FIFO_SOURCE_GYROSCOPE_Z) {
-        size += 2;
+        size += sizeof(int16_t);
     }
     // Temp : 2 bytes
     if (fifo_config & FIFO_SOURCE_TEMPERATURE) {
-        size += 2;
+        size += sizeof(int16_t);
     }
     return size;
 }
@@ -144,14 +147,14 @@ float get_delta_time_s() {
 
     gettimeofday(&now, NULL);
 
-    float dt = 0.004f;  // valeur par défaut
+    float dt = ROBOT_MPU_EXPECTED_PERIOD_S;  // valeur par défaut
     if (last.tv_sec != 0 || last.tv_usec != 0) {
         time_t sec_diff = now.tv_sec - last.tv_sec;
         suseconds_t usec_diff = now.tv_usec - last.tv_usec;
         dt = sec_diff + usec_diff / 1e6f;
 
         // Protection contre des valeurs aberrantes (ex: après suspend/reboot)
-        if (dt < 0.001f || dt > 0.02f) {
+        if (dt < ROBOT_MPU_MIN_VALID_PERIOD_S || dt > ROBOT_MPU_MAX_VALID_PERIOD_S) {
             dt = 0.004f;
         }
     }
@@ -196,11 +199,11 @@ void mpu_task(void *pvParameters) {
 
     while (reader->running ) {
   
-        uint8_t notify = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50));
+        uint8_t notify = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(ROBOT_MPU_INTERRUPT_TIMEOUT_MS));
 
         if (notify == 0) {
         // Timer a expiré, PAS d'interruption reçue
-            ESP_LOGW(TAG, "Timeout: aucune interruption reçue pendant 10 ms");
+            ESP_LOGW(TAG, "Timeout: aucune interruption reçue pendant %u ms", (unsigned)ROBOT_MPU_INTERRUPT_TIMEOUT_MS);
             mpu6050_get_interrupt_status(reader->mpu6050, &status);
             reader->connected=false;
             vTaskSuspend(NULL);
@@ -319,23 +322,13 @@ void mpu_processing_task(void* arg) {
             
             counter++;
 
-            if ((counter % 1000) == 0) {
+            if ((counter % PERF_LOG_INTERVAL_SAMPLES) == 0) {
                 ESP_LOGI("MPU_PROCESSING", "Getting values : %.2f, Atan compute: %.2f, kalman filtering: %.2f", (float)(t2-start), (float)(t3-t2), (float)(t4-t3));
             }
-            // ESP_LOGI("KALMAN", "accel=%.2f°, gyro=%.2f°/s, dt=%.4f, xk[0]=%.2f, xk[1]=%.2f", 
-            // accel_roll_angle, reader->values.gyro_value.gyro_x, dt, 
-            // reader->values.kalman_filter.xk[0], reader->values.kalman_filter.xk[1]);
-            //TODO Use function Kalman filter instead of complimentory filter
-            // esp_err_t mpu6050_complimentory_filter(mpu6050_handle_t sensor, const mpu6050_acce_value_t *const acce_value,
-            //                            const mpu6050_gyro_value_t *const gyro_value, complimentary_angle_t *const complimentary_angle)
-            // exec=(t2.tv_sec - t1.tv_sec) * 1e6 + (t2.tv_usec - t1.tv_usec); // en µs
-            // if (exec> 230.0f) {
-            // ESP_LOGW("KALMAN", "Kalman exec time: %.2f µs", exec);
-            // }
 
         }
         int64_t t5 = esp_timer_get_time();
-        int64_t t6 = 0.0;
+        int64_t t6 = 0;
         if (reader->output_values && reader->mpu_sem) {
             taskENTER_CRITICAL(reader->output_lock);
             reader->output_values->version++;
@@ -349,30 +342,9 @@ void mpu_processing_task(void* arg) {
         }
         int64_t t7 = esp_timer_get_time();
 
-        //The following block of code could be done differently
-        //my_smoothed_values+=reader->values;
-        // mpu_values_add(&accum_values, &reader->values);
-        // idx++;
-        // if(idx==1){
-        //     mpu_values_average(&accum_values, &accum_values, idx);
-        //     if (reader->output_values && reader->mpu_sem) {
-        //         taskENTER_CRITICAL(reader->output_lock);
-        //         reader->output_values->version++;
-        //         reader->output_values->acce_value = accum_values.acce_value;
-        //         reader->output_values->gyro_value = accum_values.gyro_value;
-        //         reader->output_values->angle_values = accum_values.angle_values;
-        //         reader->output_values->version++;
-        //         taskEXIT_CRITICAL(reader->output_lock);
-        //         xSemaphoreGive((*reader->mpu_sem));
-        //     }
-        //     //Reset accumulator
-        //     memset(&accum_values,0, sizeof(mpu_values_t));
-        //     idx=0; 
-        // }
-        //vTaskDelay(pdMS_TO_TICKS(1)); // Delay to avoid busy-waiting
         counter_out++;
 
-        if ((counter_out % 1000) == 0) {
+        if ((counter_out % PERF_LOG_INTERVAL_SAMPLES) == 0) {
                 ESP_LOGI("MPU_PROCESSING", "Copy values in loop : %.2f, Give back semaphore : %.2f", (float)(t6-t5), (float)(t7-t6));
             }
     }
@@ -388,7 +360,7 @@ mpu_reader_t* mpu_reader_create(void) {
     mpu_reader_t* reader = calloc(1, sizeof(mpu_reader_t));
     if (!reader) return NULL;
 
-    reader->mpu6050 = mpu6050_create(I2C_PORT, MPU6050_I2C_ADDRESS);
+    reader->mpu6050 = mpu6050_create(ROBOT_I2C_PORT, MPU6050_I2C_ADDRESS);
     if (!reader->mpu6050) {
         free(reader);
         return NULL;
@@ -457,7 +429,8 @@ esp_err_t mpu_reader_int_config(mpu_reader_t* reader, gpio_num_t int_pin, fifo_s
     }
 
     //2. Enable the Interrupts sources in the MPU6050
-    uint8_t interrupt_sources = 0x11; // Enable data ready and fifo overflow interrupts
+    uint8_t interrupt_sources = MPU6050_DATA_RDY_INT_BIT |
+    MPU6050_FIFO_OVERFLOW_INT_BIT; // Enable data ready and fifo overflow interrupts
     ret = mpu6050_enable_interrupts(reader->mpu6050, interrupt_sources);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to enable interrupt sources: %s", esp_err_to_name(ret));
@@ -475,7 +448,7 @@ esp_err_t mpu_reader_int_config(mpu_reader_t* reader, gpio_num_t int_pin, fifo_s
     reader->fifo_frame_size = get_fifo_frame_size(sources);
     
     //5. Create the queue for MPU6050 data frames
-    reader->mpu_frame_queue = xQueueCreate(QUEUE_SIZE, reader->fifo_frame_size);
+    reader->mpu_frame_queue = xQueueCreate(ROBOT_MPU_FRAME_QUEUE_LENGTH, reader->fifo_frame_size);
     if (!reader->mpu_frame_queue) {
         mpu6050_delete(reader->mpu6050);
         return ESP_FAIL;
@@ -495,14 +468,14 @@ esp_err_t mpu_reader_start(mpu_reader_t* reader){
     }
     
     // 1. Crée la tâche de lecture
-    ret = xTaskCreate(mpu_task, "mpu_task", 4096, reader, 5, &reader->mpu_task_handle);
+    ret = xTaskCreate(mpu_task, "mpu_task", ROBOT_MPU_READER_TASK_STACK_SIZE, reader, ROBOT_MPU_READER_TASK_PRIORITY, &reader->mpu_task_handle);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create MPU task");
         return ESP_FAIL;
     }
     reader->running = true;
     reader->connected = false;
-    ret =  xTaskCreate(mpu_processing_task, "mpu_processing_task", 4096, reader, 6, &reader->mpu_processing_handle);
+    ret =  xTaskCreate(mpu_processing_task, "mpu_processing_task", ROBOT_MPU_PROCESS_TASK_STACK_SIZE, reader, ROBOT_MPU_PROCESS_TASK_PRIORITY, &reader->mpu_processing_handle);
         if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create MPU Processing task");
         return ESP_FAIL;
@@ -517,7 +490,7 @@ esp_err_t mpu_reader_stop(mpu_reader_t* reader){
     }
     reader->running = false;
      // Attends que les deux tâches aient signalé leur arrêt (timeout 50 ms)
-    EventBits_t bits = xEventGroupWaitBits(reader->stop_event_group, (MPU_TASK_STOPPED_BIT | MPU_PROC_TASK_STOPPED_BIT),pdTRUE, pdTRUE, pdMS_TO_TICKS(50)); 
+    EventBits_t bits = xEventGroupWaitBits(reader->stop_event_group, (MPU_TASK_STOPPED_BIT | MPU_PROC_TASK_STOPPED_BIT),pdTRUE, pdTRUE, pdMS_TO_TICKS(ROBOT_MPU_TASK_STOP_TIMEOUT_MS)); 
     if ((bits & (MPU_TASK_STOPPED_BIT | MPU_PROC_TASK_STOPPED_BIT)) != (MPU_TASK_STOPPED_BIT | MPU_PROC_TASK_STOPPED_BIT)) {
         ESP_LOGE(TAG, "Timeout waiting for MPU tasks to stop! Forcing vTaskDelete");
         if((bits & MPU_TASK_STOPPED_BIT) == MPU_TASK_STOPPED_BIT){
@@ -648,53 +621,3 @@ esp_err_t mpu_reader_resume(mpu_reader_t* reader) {
     }
     return ESP_OK;
 }
-
-
-// // TODO : Delete from here 
-// //Accès thread-safe à la dernière valeur mesurée... 
-// bool mpu_reader_get_latest(mpu_reader_t* reader, mpu_values_t* out){
-//     if (!reader || !out || !reader->output_values || !reader->mpu_sem) return false;
-//     bool latest=false;
-//     if(xSemaphoreTake((*reader->mpu_sem), pdMS_TO_TICKS(10))==pdTRUE){
-//         (*out) = *(reader->output_values);
-//         xSemaphoreGive((*reader->mpu_sem));
-//         latest=true;
-//     }
-//     return latest;    
-// }
-
-
-// bool mpu_reader_has_new_data(mpu_reader_t* reader, uint32_t* last_version_seen){
-//     // if (!reader || !reader->output_values || !last_version_seen|| !reader->output_lock) return false;
-//     if (!reader){
-//         ESP_LOGI(TAG, "reader is NULL"); 
-//         return false;
-//     }
-//     if(!reader->output_values){
-//         ESP_LOGI(TAG, "output_values is NULL"); 
-//         return false;
-//     }
-//     if(!last_version_seen){
-//         ESP_LOGI(TAG, "last_version_seen is NULL"); 
-//         return false;
-//     }
-//     if(!reader->mpu_sem){
-//         ESP_LOGI(TAG, "output_lock is NULL"); 
-//         return false;
-//     }
-//     bool has_new=false;
-
-//     uint32_t current_version=0;
-//     if(xSemaphoreTake((*reader->mpu_sem), pdMS_TO_TICKS(10))==pdTRUE){
-//         current_version = (reader->output_values->version);
-//         if((current_version!=*last_version_seen )&&!(current_version & 1)){
-//             *last_version_seen=current_version;
-//             has_new=true;;
-//         }
-//         xSemaphoreGive((*reader->mpu_sem));
-//     }
-//     ESP_LOGI(TAG, "Current version : %lu, Last version: %lu", ((long unsigned int)current_version), ((long unsigned int)(*last_version_seen)));
-//     return has_new;    
-// }
-
-

@@ -1,5 +1,6 @@
 #include "my_i2c.h"
 #include "i2c_devices.h"
+#include "robot_config.h"
 
 #include "esp_log.h"
 #include "esp_err.h"
@@ -73,9 +74,9 @@ static void i2c_init_impl(void){
     i2c_master_bus_handle_t bus_handle = NULL;
     i2c_master_bus_config_t i2c_mst_config = {
         .clk_source = I2C_CLK_SRC_DEFAULT,
-        .i2c_port = I2C_PORT, //OK
-        .scl_io_num = GPIO_SCL,
-        .sda_io_num = GPIO_SDA,
+        .i2c_port = ROBOT_I2C_PORT, //OK
+        .scl_io_num = ROBOT_GPIO_SCL,
+        .sda_io_num = ROBOT_GPIO_SDA,
         .glitch_ignore_cnt = 7,
         .flags.enable_internal_pullup = true,
     };
@@ -101,7 +102,7 @@ void i2c_init(void){
 
 i2c_master_bus_handle_t get_i2c_bus_handle(void) {
     i2c_master_bus_handle_t my_handle;
-    i2c_port_num_t i2c_port = I2C_PORT; // Port I2C utilisé, peut être I2C_NUM_0 ou I2C_NUM_1
+    i2c_port_num_t i2c_port = ROBOT_I2C_PORT; // Port I2C utilisé, peut être I2C_NUM_0 ou I2C_NUM_1
     
     esp_err_t ret=i2c_master_get_bus_handle(i2c_port, &my_handle);
     if (ret != ESP_OK) {

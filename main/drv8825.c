@@ -1,34 +1,14 @@
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "driver/gpio.h"
-#include "esp_log.h"
-#include <math.h>
-#include "esp_rom_sys.h"
-
 #include "drv8825.h"
 
-#include <time.h>
-#include <sys/time.h>
+#include <math.h>
+
+#include "esp_log.h"
+#include "esp_rom_sys.h"
+#include "freertos/task.h"
+
+#include "robot_config.h"
 
 #define TAG "DRV8825"
-
-// DRV8825 Pins
-#define GPIO_M0     11
-#define GPIO_M1     10
-#define GPIO_M2     18
-
-//TODO Delete, WONT BE USED HERE ANYMORE, KEEP for memory 
-#define GPIO_STEP   1
-#define GPIO_DIR    4
-
-
-// Timing
-#define STEP_DELAY_US 500     // 1 ms entre deux pas
-#define RUN_DURATION_MS 12800   // 2 secondes d'avance
-#define PAUSE_DURATION_MS 2000 // 2 secondes de pause
-#define MAX_STEPS_SEC 1300 //was 1350 steps/s
-#define MIN_STEPS_SEC 50 //was 50
-#define PWM_RES 1*1000*1000
 
 #define LOW_STEP_SPEED 150
 #define MED_STEP_SPEED 800
@@ -57,13 +37,13 @@ static void motor_microstep_config(uint8_t factor){
         default: break;
     }
 
-    gpio_set_level(GPIO_M0, m0);
-    gpio_set_level(GPIO_M1, m1);
-    gpio_set_level(GPIO_M2, m2);
+    gpio_set_level(ROBOT_DRV8825_1_GPIO_M0, m0);
+    gpio_set_level(ROBOT_DRV8825_1_GPIO_M1, m1);
+    gpio_set_level(ROBOT_DRV8825_1_GPIO_M2, m2);
 }
 
 //Update microstepping according to current speed
-void update_microstepping(float abs_speed){
+void update_microstepping(float abs_speed) {
     int new_microstep;
 
     if (abs_speed < LOW_STEP_SPEED) {
@@ -77,7 +57,7 @@ void update_microstepping(float abs_speed){
     }
 
     // Appliquer uniquement si changement ET vitesse suffisamment basse
-    if (new_microstep != step_factor && abs_speed < (float)MAX_STEPS_SEC) {
+    if (new_microstep != step_factor && abs_speed < (float)ROBOT_DRV8825_1_MAX_STEPS_SEC) {
        // ESP_LOGI(TAG, "Microstepping factor : %d", new_microstep);
         motor_microstep_config(new_microstep);
         step_factor = new_microstep;
@@ -127,8 +107,8 @@ void motor_driver_set_speed(drv8825_t* drv, float steps_sec){
     if(steps_sec<0.0f){
         steps_sec=-steps_sec;
         requested_dir=1U;}
-    if((uint16_t)steps_sec>MAX_STEPS_SEC){steps_sec=MAX_STEPS_SEC;}
-    if((uint16_t)steps_sec<MIN_STEPS_SEC){steps_sec=0.0f;}//Stop motor
+    if((uint16_t)steps_sec>ROBOT_DRV8825_1_MAX_STEPS_SEC){steps_sec=ROBOT_DRV8825_1_MAX_STEPS_SEC;}
+    if((uint16_t)steps_sec<ROBOT_DRV8825_1_MIN_STEPS_SEC){steps_sec=0.0f;}//Stop motor
    
     /*
      * Cas d'arrêt.
@@ -148,7 +128,7 @@ void motor_driver_set_speed(drv8825_t* drv, float steps_sec){
         ESP_LOGE(TAG, "Invalid pulse frequency: %.2f Hz", pulse_frequency);
         return;
     }
-    uint32_t period_ticks =(uint32_t)((float)PWM_RES / pulse_frequency);
+    uint32_t period_ticks =(uint32_t)((float)ROBOT_DRV8825_1_PWM_RES / pulse_frequency);
 
     /*
      * Éviter une période MCPWM nulle si la fréquence devient
@@ -272,7 +252,7 @@ static esp_err_t drv8825_set_direction(
 //TODO : TO BE DELETED LATER
 void drv8825_sine_task(void *pvParameters) {
     drv8825_t *drv = (drv8825_t*)pvParameters;
-    drv8825_init(drv, 1000.0f, GPIO_STEP, GPIO_DIR, GPIO_UNUSED, GPIO_UNUSED);
+    drv8825_init(drv, 1000.0f, ROBOT_DRV8825_1_GPIO_STEP, ROBOT_DRV8825_1_GPIO_DIR, GPIO_NUM_NC,GPIO_NUM_NC);
     drv8825_start(drv);
   
     const float dt = 0.01; //every 10ms a new command is sent
@@ -282,7 +262,7 @@ void drv8825_sine_task(void *pvParameters) {
     uint8_t loop=0;
     float target_speed;
     while(1){
-        target_speed= MAX_STEPS_SEC *sinf(2*M_PI*SIN_FREQ_HZ*t);
+        target_speed= ROBOT_DRV8825_1_MAX_STEPS_SEC *sinf(2*M_PI*SIN_FREQ_HZ*t);
         current_speed=apply_accel_limit(current_speed, target_speed, drv->max_accel, dt);
         update_microstepping(fabs(current_speed));
         ESP_LOGI(TAG, "Speed set to %f", current_speed);
@@ -299,6 +279,7 @@ void drv8825_sine_task(void *pvParameters) {
 
     }
 }
+
 void drv8825_task(void *pvParameters) {
     drv8825_t *drv = (drv8825_t*)pvParameters;
 
@@ -330,7 +311,7 @@ esp_err_t drv8825_init(drv8825_t *drv, float max_accel, gpio_num_t step_pin, gpi
     
     //Config GPIO Step and Dir
     gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << GPIO_M0) | (1ULL << GPIO_M1) | (1ULL << GPIO_M2) |
+        .pin_bit_mask = (1ULL << ROBOT_DRV8825_1_GPIO_M0) | (1ULL << ROBOT_DRV8825_1_GPIO_M1) | (1ULL << ROBOT_DRV8825_1_GPIO_M2) |
                         (1ULL << step_pin) | (1ULL << dir_pin),
         .mode = GPIO_MODE_OUTPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
@@ -339,7 +320,7 @@ esp_err_t drv8825_init(drv8825_t *drv, float max_accel, gpio_num_t step_pin, gpi
     };
     gpio_config(&io_conf);
     //Init SLEEP optionnal
-    if(sleep !=GPIO_UNUSED){
+    if(sleep !=GPIO_NUM_NC){
                 gpio_config_t io_conf_sleep = {
         .pin_bit_mask = (1ULL << sleep),
         .mode = GPIO_MODE_OUTPUT,
@@ -352,7 +333,7 @@ esp_err_t drv8825_init(drv8825_t *drv, float max_accel, gpio_num_t step_pin, gpi
     }
     
     //Init ENABLE optionnal
-    if(enable !=GPIO_UNUSED){
+    if(enable !=GPIO_NUM_NC){
         gpio_config_t io_conf_enable = {
             .pin_bit_mask = (1ULL << enable),
             .mode = GPIO_MODE_OUTPUT,
@@ -376,7 +357,7 @@ esp_err_t drv8825_init(drv8825_t *drv, float max_accel, gpio_num_t step_pin, gpi
         .group_id = 0, //or 1 
         .intr_priority=0,
         .clk_src = MCPWM_TIMER_CLK_SRC_DEFAULT,
-        .resolution_hz = PWM_RES, // 10 MHz: tick = 100 ns
+        .resolution_hz = ROBOT_DRV8825_1_PWM_RES, // 10 MHz: tick = 100 ns
         .count_mode = MCPWM_TIMER_COUNT_MODE_UP,
         .period_ticks = 20000, // (20000 -> 20ms -> 50Hz ) period
         .flags.update_period_on_empty=1,
@@ -491,13 +472,13 @@ esp_err_t drv8825_deinit(drv8825_t* drv){
 
 
 esp_err_t drv8825_sleep(drv8825_t* drv, bool enable){
-        if (!drv || drv->sleep_pin == GPIO_UNUSED) return ESP_ERR_INVALID_STATE;
+        if (!drv || drv->sleep_pin == GPIO_NUM_NC) return ESP_ERR_INVALID_STATE;
     gpio_set_level(drv->sleep_pin, enable ? 0 : 1); // SLEEP pin : 0 = sleep active 
     return ESP_OK;
 }
 
 esp_err_t drv8825_enable(drv8825_t* drv, bool enable){
-        if (!drv || drv->enable_pin == GPIO_UNUSED) return ESP_ERR_INVALID_STATE;
+        if (!drv || drv->enable_pin == GPIO_NUM_NC) return ESP_ERR_INVALID_STATE;
     gpio_set_level(drv->enable_pin, enable ? 0 : 1); // EN pin : 0 = enabled
     return ESP_OK;
     return ESP_OK;
@@ -540,66 +521,3 @@ bool drv8825_is_running(drv8825_t* drv){
 }
 
 
-//TODO a revoir et à intégrer à motor task
-void drv8825_set_speed(drv8825_t* drv, float pid_output) {
-    //OLD motor_driver_set_speed
-    // if (!drv || !drv->timer) return;
-    //     uint8_t dir=0;
-    // if(steps_sec<0.0f){
-    //     steps_sec=-steps_sec;
-    //     dir=1;}
-    // if ((uint16_t)steps_sec>MAX_STEPS_SEC){steps_sec=MAX_STEPS_SEC;}
-    // if((uint16_t)steps_sec<MIN_STEPS_SEC){steps_sec=MIN_STEPS_SEC;}
-    
-    // uint16_t period = (uint16_t)(PWM_RES/(steps_sec*step_factor));
-    // gpio_set_level(drv->dir_pin, dir);
-    // mcpwm_timer_set_period(drv->timer, period);
-
-    float target_speed_steps_per_sec;
-    uint32_t period_ticks = 0;
-    uint8_t dir;
-
-    // TODO Review this block 
-    //Clamp PID output comme chez Joop
-    if (pid_output > 400) pid_output = 400;
-    else if (pid_output < -400) pid_output = -400;
-
-    // Déterminer la direction - OK
-    if (pid_output < 0.0f) {
-        dir = 1; // reverse
-        pid_output = -pid_output; // valeur absolue
-    } else {
-        dir = 0; // forward
-    }
-
-    // Convertir PID en vitesse cible en steps/sec
-    target_speed_steps_per_sec = (pid_output / 400.0f) * MAX_STEPS_SEC;
-
-    // Clamp sur la plage min/max
-    if (target_speed_steps_per_sec < MIN_STEPS_SEC)
-        target_speed_steps_per_sec = 0.0f; // stop motor
-    else if (target_speed_steps_per_sec > MAX_STEPS_SEC)
-        target_speed_steps_per_sec = MAX_STEPS_SEC;
-
-    // Mettre à jour DIR
-    gpio_set_level(GPIO_DIR, dir);
-
-    if (target_speed_steps_per_sec == 0.0f) {
-        // Stop du timer
-        drv8825_stop(drv);
-    } else {
-      
-        if (!drv8825_is_running(drv)) {
-            // Démarrer MCPWM si pas en cours
-            drv8825_start(drv);
-            drv->running = true;
-        }
-
-          // Période = 1 / freq → converti en ticks
-        period_ticks = (uint32_t)(PWM_RES / (target_speed_steps_per_sec * step_factor));
-        mcpwm_timer_set_period(drv->timer, period_ticks);
-
-    }
-
-    //ESP_LOGI(TAG, "PID=%.1f → Speed=%.1f steps/sec → Period=%lu ticks", pid_output, target_speed_steps_per_sec, period_ticks);
-}

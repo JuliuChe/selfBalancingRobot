@@ -1,0 +1,69 @@
+//drv_8825.h
+//TODO : Review this method 
+void drv8825_set_speed(drv8825_t* drv, float pid_output);
+
+
+//drv_8825c
+//TODO a revoir et à intégrer à motor task
+void drv8825_set_speed(drv8825_t* drv, float pid_output) {
+    //OLD motor_driver_set_speed
+    // if (!drv || !drv->timer) return;
+    //     uint8_t dir=0;
+    // if(steps_sec<0.0f){
+    //     steps_sec=-steps_sec;
+    //     dir=1;}
+    // if ((uint16_t)steps_sec>MAX_STEPS_SEC){steps_sec=MAX_STEPS_SEC;}
+    // if((uint16_t)steps_sec<MIN_STEPS_SEC){steps_sec=MIN_STEPS_SEC;}
+    
+    // uint16_t period = (uint16_t)(PWM_RES/(steps_sec*step_factor));
+    // gpio_set_level(drv->dir_pin, dir);
+    // mcpwm_timer_set_period(drv->timer, period);
+
+    float target_speed_steps_per_sec;
+    uint32_t period_ticks = 0;
+    uint8_t dir;
+
+    // TODO Review this block 
+    //Clamp PID output comme chez Joop
+    if (pid_output > 400) pid_output = 400;
+    else if (pid_output < -400) pid_output = -400;
+
+    // Déterminer la direction - OK
+    if (pid_output < 0.0f) {
+        dir = 1; // reverse
+        pid_output = -pid_output; // valeur absolue
+    } else {
+        dir = 0; // forward
+    }
+
+    // Convertir PID en vitesse cible en steps/sec
+    target_speed_steps_per_sec = (pid_output / 400.0f) * MAX_STEPS_SEC;
+
+    // Clamp sur la plage min/max
+    if (target_speed_steps_per_sec < MIN_STEPS_SEC)
+        target_speed_steps_per_sec = 0.0f; // stop motor
+    else if (target_speed_steps_per_sec > MAX_STEPS_SEC)
+        target_speed_steps_per_sec = MAX_STEPS_SEC;
+
+    // Mettre à jour DIR
+    gpio_set_level(GPIO_DIR, dir);
+
+    if (target_speed_steps_per_sec == 0.0f) {
+        // Stop du timer
+        drv8825_stop(drv);
+    } else {
+      
+        if (!drv8825_is_running(drv)) {
+            // Démarrer MCPWM si pas en cours
+            drv8825_start(drv);
+            drv->running = true;
+        }
+
+          // Période = 1 / freq → converti en ticks
+        period_ticks = (uint32_t)(PWM_RES / (target_speed_steps_per_sec * step_factor));
+        mcpwm_timer_set_period(drv->timer, period_ticks);
+
+    }
+
+    //ESP_LOGI(TAG, "PID=%.1f → Speed=%.1f steps/sec → Period=%lu ticks", pid_output, target_speed_steps_per_sec, period_ticks);
+}
