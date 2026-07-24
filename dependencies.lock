@@ -12,13 +12,13 @@ dependencies:
   espressif/mpu6050:
     dependencies: []
     source:
-      path: C:\esp32_Proj\selfBalancingRobot\components\espressif__mpu6050
+      path: C:\Users\Julie\selfBalancingRobot\selfBalancingRobot\components\espressif__mpu6050
       type: local
     version: 1.2.0
   idf:
     source:
       type: idf
-    version: 5.4.1
+    version: 5.4.4
 direct_dependencies:
 - espressif/led_strip
 - espressif/mpu6050
