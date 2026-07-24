@@ -11,7 +11,7 @@
 #include "my_i2c.h"
 #include "mpu_reader.h"
 #include "led_rgb.h"
-#include "drv8825.h"
+#include "drivebase.h"
 
 
 #include "pid.h"
@@ -26,15 +26,9 @@
 
 #define CTRL_QUEUE_SIZE 32 // Size of the queue for MPU6050 data frames
 #define MAX_MPU_RESTART 10
-// #define GPIO_MPU_INT GPIO_NUM_3
-#define TAG "CTRLER"
-// #define ROBOT_DRIVE_MAX_ACCEL 5000.0f //was 4000
-// #define ROBOT_BALANCE_MAX_OUTPUT 1500.0f //was 1100
 
-// #define ROBOT_PID_KP_DEFAULT 23.0f //was 15.0f was 35.0f was 20.0f
-// #define ROBOT_PID_KI_DEFAULT 0.01f //was 0.10f
-// #define ROBOT_PID_KD_DEFAULT 1.0f //was 20.0f was 8.5f was 15.0f
-#define TARGET_ANGLE 90.0f 
+#define TAG "CTRLER"
+
 
 typedef enum {
     CTRL_INIT,  
@@ -61,7 +55,7 @@ typedef enum {
 
         balance_control_t balance_control;
 
-        drv8825_t one_driver;
+        drivebase_t drivebase;
 
         mpu_reader_t *my_reader; //OK on init
         uint8_t mpu_task_counter;
@@ -116,8 +110,7 @@ void motor_control_task(void *pvParam){
     // uint16_t check_roll=0;
     struct timeval last_time;
     gettimeofday(&last_time, NULL); // Init du timer
-    ESP_LOGI(TAG, "In beginning of control motor task, running of driver is : %d",ctx->one_driver.running);
-
+    
     while(1){
         if(xSemaphoreTake(ctx->ctrl_sync_sem, pdMS_TO_TICKS(50))!=pdTRUE){
             if(!mpu_reader_is_connected(ctx->my_reader)){
@@ -150,7 +143,7 @@ void motor_control_task(void *pvParam){
         // float mot_speed_dt=0.0f;
         
         if (roll <= ROBOT_MIN_BALANCE_ANGLE || roll >= ROBOT_MAX_BALANCE_ANGLE) {
-            drv8825_stop(&ctx->one_driver);
+            drivebase_stop(&ctx->drivebase);
             ESP_LOGI(TAG, "Robot Lying ... Exiting motor control task");
             ctrl_event_msg_t event = {.type = EV_STOP_BALANCING,.err_code = ESP_OK, .msg = ""};
             xQueueSend(ctx->ctrl_event_queue, &event, 0);
@@ -158,9 +151,7 @@ void motor_control_task(void *pvParam){
         }
         float command=balance_control_compute(&ctx->balance_control, roll, roll_speed, dt);
 
-        drv8825_set_target_speed(&ctx->one_driver, command);
-        drv8825_update(&ctx->one_driver, dt);
-
+        drivebase_apply_balance(&ctx->drivebase, command, dt);
     
         vTaskDelay(pdMS_TO_TICKS(1));
     }
@@ -186,16 +177,6 @@ static ctrl_state_t ctrl_state_init(controller_ctx_t* ctx, ctrl_event_msg_t* eve
         case EV_INIT:
             // Initialisation du contexte, des ressources, etc.
             ESP_LOGI(TAG, "Initialisation des ressources...");
-            // Créer la queue d'événements si pas déjà créée
-            if (ctx->ctrl_event_queue == NULL) {
-                ctx->ctrl_event_queue= xQueueCreate(CTRL_QUEUE_SIZE, sizeof(ctrl_event_msg_t));
-            }
-            //If no queue, don't send an event and straight to ERROR
-            if (!ctx->ctrl_event_queue){
-                ESP_LOGE(TAG, "Failed to create event queue (to store event from controller FSM) in CTRL_INIT");
-                next_state = CTRL_ERROR;
-                break;
-            } 
             // Initialisation des ressources
                 // capteur mpu6050...
             i2c_init();
@@ -221,12 +202,12 @@ static ctrl_state_t ctrl_state_init(controller_ctx_t* ctx, ctrl_event_msg_t* eve
 
 
             //Init balancing - See defines to adjust Kp, Ki and Kd of pid controler
-            balance_control_init(&ctx->balance_control, ROBOT_PID_KP_DEFAULT, ROBOT_PID_KI_DEFAULT, ROBOT_PID_KD_DEFAULT, TARGET_ANGLE, ROBOT_BALANCE_MAX_OUTPUT);   
+            balance_control_init(&ctx->balance_control, ROBOT_PID_KP_DEFAULT, ROBOT_PID_KI_DEFAULT, ROBOT_PID_KD_DEFAULT, ROBOT_TARGET_ANGLE_DEFAULT, ROBOT_BALANCE_MAX_OUTPUT);   
             
             //Motor init 
-            ret = drv8825_init(&ctx->one_driver, ROBOT_DRV8825_MAX_ACCEL, ROBOT_DRV8825_1_GPIO_STEP, ROBOT_DRV8825_1_GPIO_DIR, ROBOT_DRV8825_1_GPIO_SLEEP, ROBOT_DRV8825_1_GPIO_EN);
+            ret = drivebase_init(&ctx->drivebase);
             if (ret!=ESP_OK) {
-                new_event = (ctrl_event_msg_t){EV_ERROR, ESP_ERR_INVALID_ARG, "In CTRL_INIT, failed to initialize motor driver drv8825"};
+                new_event = (ctrl_event_msg_t){EV_ERROR, ESP_ERR_INVALID_ARG, "In CTRL_INIT, failed to initialize motor drivebase"};
                 next_state = CTRL_ERROR;
                 break;
             }
@@ -480,7 +461,7 @@ static ctrl_state_t ctrl_state_lost_mpu(controller_ctx_t* ctx, ctrl_event_msg_t*
 
                 // Start the timer to give time to reconnect 1 second
                 ctx->my_timer_context.event_to_send=(ctrl_event_msg_t){EV_MPU_DATA_READY, ESP_OK, NULL}; // Set the event to send when the timer expires
-                ret = timer_ctrl_start(ctx->my_timer_context, 1000, NULL);
+                ret = timer_ctrl_start(ctx->my_timer_context, 500, NULL);
                 if(ret!=ESP_OK){
                     new_event = (ctrl_event_msg_t){EV_ERROR, ESP_ERR_INVALID_RESPONSE, "In CTRL_CONFIG, Failed to start the timer..."};
                     next_state = CTRL_ERROR;
@@ -511,7 +492,7 @@ static ctrl_state_t ctrl_state_balancing(controller_ctx_t* ctx, ctrl_event_msg_t
             ESP_LOGI(TAG, "State CTRL_BALANCING, Apply speed to motor, Event : %s", ctrl_event_to_str(event->type));
             next_state=CTRL_BALANCING;
             //TODO Deal with error from start method
-            ESP_ERROR_CHECK(drv8825_start(&ctx->one_driver));
+            ESP_ERROR_CHECK(drivebase_start(&ctx->drivebase));
             xTaskCreate(motor_control_task, "controller_task", 4096, ctx, 10, NULL);
             break;
         case EV_STOP_BALANCING:
@@ -522,7 +503,7 @@ static ctrl_state_t ctrl_state_balancing(controller_ctx_t* ctx, ctrl_event_msg_t
             log_buffer.count = 0; // Reset count after printing
     
             //TODO Deal with error from stop method
-            drv8825_stop(&ctx->one_driver);
+            drivebase_stop(&ctx->drivebase);
             xQueueSend(ctx->ctrl_event_queue, &new_event, (TickType_t) 2);
             
             break;
@@ -531,7 +512,7 @@ static ctrl_state_t ctrl_state_balancing(controller_ctx_t* ctx, ctrl_event_msg_t
             next_state = CTRL_LOST_MPU;
             new_event = (ctrl_event_msg_t){EV_LOST_MPU, ESP_OK, NULL};
             //TODO Deal with error from stop method
-            drv8825_stop(&ctx->one_driver);
+            drivebase_stop(&ctx->drivebase);
             xQueueSend(ctx->ctrl_event_queue, &new_event, (TickType_t) 2);
             break;
 
@@ -601,7 +582,7 @@ static ctrl_state_t ctrl_state_stop(controller_ctx_t* ctx, ctrl_event_msg_t* eve
         //DeInit motor controller
         //TODO Deal with error from deinit method
         //Deinit stops and deinit pointers
-         drv8825_deinit(&ctx->one_driver);
+         drivebase_deinit(&ctx->drivebase);
 
         //Stops the leds
         ctx->leds.running = false; // Set the LED task running flag to false
@@ -642,10 +623,17 @@ void controller_task(void *pvParam){
 
     // Initialiser le contexte ici si besoin (queues, etc.)
     ctx.ctrl_event_queue = xQueueCreate(CTRL_QUEUE_SIZE, sizeof(ctrl_event_msg_t));
+
+    //If no queue, don't send an event and straight to ERROR
+    if (!ctx.ctrl_event_queue){
+        ESP_LOGE(TAG, "Failed to create event queue (to store event from controller FSM)");
+        vTaskDelete(NULL);
+        return;
+    } 
+
     ctrl_state_t state = CTRL_INIT;
     ctrl_event_msg_t event = {EV_INIT, ESP_OK, NULL};
     xQueueSend(ctx.ctrl_event_queue, &event, portMAX_DELAY);
-
 
 
     while(1) {

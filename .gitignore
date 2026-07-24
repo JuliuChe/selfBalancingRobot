@@ -16,3 +16,6 @@ esp_traces/
 Thumbs.db
 *.swp
 *~
+
+# Disposable logs 
+/debug.log

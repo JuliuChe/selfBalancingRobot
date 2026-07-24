@@ -280,16 +280,6 @@ void drv8825_sine_task(void *pvParameters) {
     }
 }
 
-void drv8825_task(void *pvParameters) {
-    drv8825_t *drv = (drv8825_t*)pvParameters;
-
-    while(drv->running){
-          drv->current_speed = apply_accel_limit(drv->current_speed, drv->target_speed, drv->max_accel, 0.01);
-        motor_driver_set_speed(drv, drv->current_speed);
-    }
-    vTaskDelete(NULL);
-
-}
 
 //API
 esp_err_t drv8825_init(drv8825_t *drv, float max_accel, gpio_num_t step_pin, gpio_num_t dir_pin, gpio_num_t sleep, gpio_num_t enable){
