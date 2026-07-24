@@ -10,13 +10,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
-
-void update_microstepping(float abs_speed);
-
-//New driver
-
-
-
 typedef struct{
     
     float max_accel;

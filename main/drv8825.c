@@ -17,7 +17,13 @@
 
 #define SIN_FREQ_HZ 0.5
 
+static void motor_microstep_config(uint8_t factor);
+static void update_microstepping(float abs_speed);
+static float apply_accel_limit(float current, float target, float max_accel, float dt);
+static void motor_driver_set_speed(drv8825_t* drv, float steps_sec);
+
 static esp_err_t drv8825_set_direction(drv8825_t *drv, uint8_t new_dir);
+
 
 
 static int step_factor = 1;
@@ -43,7 +49,7 @@ static void motor_microstep_config(uint8_t factor){
 }
 
 //Update microstepping according to current speed
-void update_microstepping(float abs_speed) {
+static void update_microstepping(float abs_speed) {
     int new_microstep;
 
     if (abs_speed < LOW_STEP_SPEED) {
@@ -75,13 +81,11 @@ static float apply_accel_limit(float current, float target, float max_accel, flo
     return current + delta;
 }
 
-// static struct timeval last_time;
-static uint16_t count;
 
 // Apply new period of the PWM according to step/s speed. It is modulated by the micro-stepping factor 
 /// @param drv 
 /// @param steps_sec 
-void motor_driver_set_speed(drv8825_t* drv, float steps_sec){
+static void motor_driver_set_speed(drv8825_t* drv, float steps_sec){
     if (!drv ) {
         ESP_LOGI(TAG, "In motor driver set speed drv is null");
         return;
@@ -92,17 +96,6 @@ void motor_driver_set_speed(drv8825_t* drv, float steps_sec){
         return;
     }
     
-    //Block the call to this function to 10ms
-    // struct timeval now;
-    // gettimeofday(&now, NULL);
-    // float my_dt = (now.tv_sec - last_time.tv_sec)*1000.0f + (now.tv_usec - last_time.tv_usec) / 1000.0f;
-    
-    // if(my_dt<10.0f){
-    //     return;
-    // }
-    // last_time = now;
-
-
     uint8_t requested_dir=0U;
     if(steps_sec<0.0f){
         steps_sec=-steps_sec;
@@ -197,13 +190,6 @@ void motor_driver_set_speed(drv8825_t* drv, float steps_sec){
 
         drv->running = true;
     }
-
-    count++;
-
-    if (count >= 600U) {
-        count = 0U;
-    }
-
 }
 
 
@@ -284,7 +270,6 @@ void drv8825_sine_task(void *pvParameters) {
 //API
 esp_err_t drv8825_init(drv8825_t *drv, float max_accel, gpio_num_t step_pin, gpio_num_t dir_pin, gpio_num_t sleep, gpio_num_t enable){
     if (!drv) return ESP_ERR_INVALID_ARG;
-    count=0;
     //Init struct
     drv->max_accel=max_accel;
     drv->step_pin=step_pin;
@@ -397,11 +382,6 @@ esp_err_t drv8825_start(drv8825_t *drv){
     if(!drv || drv->running) return ESP_ERR_INVALID_STATE;
     ESP_ERROR_CHECK(mcpwm_timer_start_stop(drv->timer, MCPWM_TIMER_START_NO_STOP));
     drv->running=true;
-    // BaseType_t ret = xTaskCreate(drv8825_task, "driver_task", 4096, drv, 5, drv->motor_task_handle);
-    //     if (ret != pdPASS) {
-    //     drv->running = false;
-    //     return ESP_FAIL;
-    // }
     return ESP_OK;
 }
 
@@ -470,7 +450,6 @@ esp_err_t drv8825_sleep(drv8825_t* drv, bool enable){
 esp_err_t drv8825_enable(drv8825_t* drv, bool enable){
         if (!drv || drv->enable_pin == GPIO_NUM_NC) return ESP_ERR_INVALID_STATE;
     gpio_set_level(drv->enable_pin, enable ? 0 : 1); // EN pin : 0 = enabled
-    return ESP_OK;
     return ESP_OK;
 }
 

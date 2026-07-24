@@ -29,5 +29,4 @@ void app_main(void)
     // xTaskCreate(drv8825_sine_task, "drv8825", 4096,&mydrv, 10, NULL);
     xTaskCreate(controller_task, "controller_task", 4096, NULL, 10, NULL);
 
-    // xTaskCreate(drv8825_task, "drv8825_task", 2048, NULL, 5, NULL);
 }
