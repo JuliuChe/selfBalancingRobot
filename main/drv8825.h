@@ -10,15 +10,16 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
-typedef struct{
-    
-    float max_accel;
-    float current_speed;
-    float target_speed;
+typedef enum {
+    FULL_STEP        = 1,
+    HALF_STEP        = 2,
+    QUARTER_STEP     = 4,
+    EIGHTH_STEP      = 8,
+    SIXTEENTH_STEP   = 16,
+    THIRTY_SECOND    = 32
+} drv8825_microstep_t;
 
-
-    volatile bool running;
-
+typedef struct {
     gpio_num_t step_pin;
     gpio_num_t dir_pin;
 
@@ -26,20 +27,47 @@ typedef struct{
     gpio_num_t sleep_pin;
     gpio_num_t enable_pin;
 
+    //Microstepping pins
+    gpio_num_t m0;
+    gpio_num_t m1;
+    gpio_num_t m2;
+
+    uint16_t max_step_sec;
+    uint16_t min_step_sec;
+
+    drv8825_microstep_t mode;
+    float max_accel;
+
+    
+
+} drv8825_config_t;
+
+
+typedef struct{
+    
+    float current_speed;
+    float target_speed;
+    uint8_t current_dir;
+    drv8825_microstep_t current_microstep_factor;
+
     mcpwm_timer_handle_t timer;
     mcpwm_oper_handle_t oper;
     mcpwm_cmpr_handle_t comparator;
     mcpwm_gen_handle_t generator;
 
     SemaphoreHandle_t target_speed_mutex;
-
-    uint8_t current_dir;
+   
     bool direction_initialized;
+    bool started;
+    bool step_pulse_active; 
+
+    drv8825_config_t config;
 
 } drv8825_t;
 
+
 //Init Driver step and dir pin are mandatory, sleep and enable are optionals set to GPIO_UNUSED
-esp_err_t drv8825_init(drv8825_t *drv, float max_accel, gpio_num_t step_pin,  gpio_num_t dir_pin, gpio_num_t sleep, gpio_num_t enable);
+esp_err_t drv8825_init(drv8825_t *drv, const drv8825_config_t *config);
 esp_err_t drv8825_start(drv8825_t *drv);
 esp_err_t drv8825_stop(drv8825_t *drv);
 esp_err_t drv8825_deinit(drv8825_t* drv);

@@ -2,6 +2,7 @@
 #define ROBOT_CONFIG_H
 
 #include "driver/gpio.h"
+#include "drv8825.h"
 /* Balance-controller defaults */
 
 #define ROBOT_PID_KP_DEFAULT     20.0f
@@ -33,9 +34,10 @@
 #define ROBOT_DRV8825_1_GPIO_SLEEP  GPIO_NUM_NC
 
 // Timing for motor driver
-#define ROBOT_DRV8825_1_MAX_STEPS_SEC 1300 //was 1350 steps/s
+#define ROBOT_DRV8825_1_INIT_MICROSTEP   HALF_STEP
+#define ROBOT_DRV8825_1_MAX_STEPS_SEC 2000 //was 1350 steps/s
 #define ROBOT_DRV8825_1_MIN_STEPS_SEC 50 //was 50
-#define ROBOT_DRV8825_1_PWM_RES (1U*1000U*1000U)
+
 #define ROBOT_DRV8825_MAX_ACCEL    5000.0f
 
 /* I2C Bus Config*/
