@@ -430,6 +430,7 @@ esp_err_t drv8825_init(drv8825_t *drv, const drv8825_config_t *config){
     // ESP_ERROR_CHECK(mcpwm_timer_start_stop(timer, MCPWM_TIMER_STOP_FULL));
     // ESP_ERROR_CHECK(mcpwm_timer_disable(timer));
     drv->started=false;
+    drv->step_pulse_active=false;
     ESP_LOGI(TAG, "DRV8825 initialized.");
     return ESP_OK;
 }
