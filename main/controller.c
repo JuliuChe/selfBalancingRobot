@@ -12,10 +12,8 @@
 #include "mpu_reader.h"
 #include "led_rgb.h"
 #include "drivebase.h"
+#include "balance_loop.h"
 
-
-#include "pid.h"
-#include "kalmanfilter.h"
 
 #include "controller.h"
 #include "controller_events.h"
@@ -56,12 +54,12 @@ typedef enum {
         balance_control_t balance_control;
 
         drivebase_t drivebase;
-
+        balance_loop_t balancer;
         mpu_reader_t *my_reader; //OK on init
         uint8_t mpu_task_counter;
         SemaphoreHandle_t ctrl_sync_sem; //OK on init
         mpu_values_t mpu_val;
-        uint32_t version_read; 
+        uint32_t version_read;
     } controller_ctx_t;
     //Led colors for states 
     rgb_t init_col={64, 0,0}; // Initial color for LED RGB
@@ -103,66 +101,6 @@ void log_ctrl_add(logs_ctrl_buffer_t* buf, float roll, float dt, float pid, floa
     if (buf->count < LOG_BUFFER_SIZE) buf->count++;
 }
 
-//Boucle de control moteur
-void motor_control_task(void *pvParam){
-    controller_ctx_t* ctx=(controller_ctx_t*)pvParam;
-  
-    // uint16_t check_roll=0;
-    struct timeval last_time;
-    gettimeofday(&last_time, NULL); // Init du timer
-
-    while(1){
-        if(xSemaphoreTake(ctx->ctrl_sync_sem, pdMS_TO_TICKS(50))!=pdTRUE){
-            if(!mpu_reader_is_connected(ctx->my_reader)){
-                ESP_LOGI(TAG, "Lost connection with accelerometer... Exiting motor control task");
-                ctrl_event_msg_t new_event = { .type = EV_LOST_MPU, .err_code = ESP_OK, .msg=""};
-                xQueueSend(ctx->ctrl_event_queue, &new_event,(TickType_t) 2);
-                break;
-            }
-            continue;
-        }
-        float roll;
-        float roll_speed;
-
-        taskENTER_CRITICAL(&mpu_lock);
-        roll=ctx->mpu_val.kalman_filter.xk[0]; // Use Kalman filter roll angle
-        roll_speed=ctx->mpu_val.kalman_filter.xk[1]; // Use Kalman filter roll speed
-        taskEXIT_CRITICAL(&mpu_lock);
-
-        
-
-        struct timeval now;
-        gettimeofday(&now, NULL);
-        float dt=(float)(now.tv_sec - last_time.tv_sec)+((float)(now.tv_usec - last_time.tv_usec)) / 1000000.0f;
-        last_time=now;
-        
-        //If time difference is too small or too big, skip this loop iteration  
-        if(dt<=0.0f || dt>0.05f){continue;}
-        
-        
-        // float mot_speed_dt=0.0f;
-        
-        if (roll <= ROBOT_MIN_BALANCE_ANGLE || roll >= ROBOT_MAX_BALANCE_ANGLE) {
-            drivebase_stop(&ctx->drivebase);
-            ESP_LOGI(TAG, "Robot Lying ... Exiting motor control task");
-            ctrl_event_msg_t event = {.type = EV_STOP_BALANCING,.err_code = ESP_OK, .msg = ""};
-            xQueueSend(ctx->ctrl_event_queue, &event, 0);
-            break;
-        }
-
-        float command=balance_control_compute(&ctx->balance_control, roll, roll_speed, dt);
-        esp_err_t ret_bal = drivebase_apply_balance(&ctx->drivebase, command, dt);
-        if(ret_bal != ESP_OK){
-            drivebase_stop(&ctx->drivebase);
-            ctrl_event_msg_t event = {.type = EV_ERROR,.err_code = ret_bal, .msg = "Impossible to apply speed command to motors"};
-            xQueueSend(ctx->ctrl_event_queue, &event, 0);
-            break;
-        }
-    
-        vTaskDelay(pdMS_TO_TICKS(1));
-    }
-    vTaskDelete(NULL);
-}
 
 // Handler prototype
  //Functions processing a state
@@ -187,6 +125,7 @@ static ctrl_state_t ctrl_state_init(controller_ctx_t* ctx, ctrl_event_msg_t* eve
                 // capteur mpu6050...
             i2c_init();
             ctx->my_reader =mpu_reader_create();
+            ctx->balancer.my_reader = ctx->my_reader;
             if (!ctx->my_reader) {
                 new_event = (ctrl_event_msg_t){EV_ERROR, ESP_ERR_INVALID_ARG, "In CTRL_INIT, failed to initialize MPU reader"};
                 next_state = CTRL_ERROR;
@@ -195,11 +134,14 @@ static ctrl_state_t ctrl_state_init(controller_ctx_t* ctx, ctrl_event_msg_t* eve
 
             //Create Semaphore for synchronized access to output values
             ctx->ctrl_sync_sem=xSemaphoreCreateBinary();
+            ctx->balancer.ctrl_sync_sem = ctx->ctrl_sync_sem;
             if(!ctx->ctrl_sync_sem){
                 new_event = (ctrl_event_msg_t){EV_ERROR, ESP_ERR_INVALID_ARG, "In CTRL_INIT, failed to create MPU semaphore"};
                 next_state = CTRL_ERROR;
+                break;
             }
             esp_err_t ret=mpu_reader_set_output_buffer(ctx->my_reader, &ctx->mpu_val,  &ctx->ctrl_sync_sem, &mpu_lock);
+            ctx->balancer.mpu_val = &ctx->mpu_val;
             if (ret!=ESP_OK) {
                 new_event = (ctrl_event_msg_t){EV_ERROR, ESP_ERR_INVALID_ARG, "In CTRL_INIT, failed to initialize MPU reader"};
                 next_state = CTRL_ERROR;
@@ -209,7 +151,8 @@ static ctrl_state_t ctrl_state_init(controller_ctx_t* ctx, ctrl_event_msg_t* eve
 
             //Init balancing - See defines to adjust Kp, Ki and Kd of pid controler
             balance_control_init(&ctx->balance_control, ROBOT_PID_KP_DEFAULT, ROBOT_PID_KI_DEFAULT, ROBOT_PID_KD_DEFAULT, ROBOT_TARGET_ANGLE_DEFAULT, ROBOT_BALANCE_MAX_OUTPUT);   
-            
+            ctx->balancer.balance_control = &ctx->balance_control;
+
             //Motor init 
             ret = drivebase_init(&ctx->drivebase);
             if (ret!=ESP_OK) {
@@ -217,6 +160,7 @@ static ctrl_state_t ctrl_state_init(controller_ctx_t* ctx, ctrl_event_msg_t* eve
                 next_state = CTRL_ERROR;
                 break;
             }
+            ctx->balancer.drivebase = &ctx->drivebase;
                 // leds
             led_rgb_init(&ctx->leds);    
             ctx->leds.led_rgb_queue=xQueueCreate(CTRL_QUEUE_SIZE, sizeof(rgb_t));
@@ -497,7 +441,7 @@ static ctrl_state_t ctrl_state_balancing(controller_ctx_t* ctx, ctrl_event_msg_t
             xQueueSend(ctx->leds.led_rgb_queue, &ready_col, (TickType_t) 2); 
             ESP_LOGI(TAG, "State CTRL_BALANCING, Apply speed to motor, Event : %s", ctrl_event_to_str(event->type));
             next_state=CTRL_BALANCING;
-            //TODO Deal with error from start method
+
             esp_err_t ret = drivebase_start(&ctx->drivebase);
             if(ret != ESP_OK){
                 new_event = (ctrl_event_msg_t){EV_ERROR, ret, "In CTRL_BALANCING, failed to start the drivebase"};
@@ -505,7 +449,16 @@ static ctrl_state_t ctrl_state_balancing(controller_ctx_t* ctx, ctrl_event_msg_t
                 xQueueSend(ctx->ctrl_event_queue, &new_event, (TickType_t) 2);
                 break;
             }
-            xTaskCreate(motor_control_task, "controller_task", 4096, ctx, 10, NULL);
+
+            BaseType_t xTaskReturned = xTaskCreate(balance_loop_task, "balance_loop", 4096, &ctx->balancer, 10, NULL);
+            if(xTaskReturned!=pdPASS){
+                drivebase_stop(&ctx->drivebase);
+                esp_err_t error = ESP_ERR_NO_MEM;
+                new_event = (ctrl_event_msg_t){EV_ERROR, error, "In CTRL_BALANCING, failed to start the balance loop task"};
+                next_state = CTRL_ERROR;
+                xQueueSend(ctx->ctrl_event_queue, &new_event, (TickType_t) 2);
+                break;
+            }
             break;
         case EV_STOP_BALANCING:
             next_state = CTRL_START_MPU;
@@ -646,6 +599,10 @@ void controller_task(void *pvParam){
         vTaskDelete(NULL);
         return;
     } 
+
+    ctx.balancer.ctrl_event_queue = ctx.ctrl_event_queue;
+    ctx.balancer.mpu_lock = &mpu_lock;
+
 
     ctrl_state_t state = CTRL_INIT;
     ctrl_event_msg_t event = {EV_INIT, ESP_OK, NULL};
