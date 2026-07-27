@@ -33,7 +33,6 @@ typedef enum {
     CTRL_START_MPU, 
     CTRL_LOST_MPU,
     CTRL_BALANCING,
-    CTRL_REMOTE_CONTROL, //do not use yet 
     CTRL_ERROR,
     CTRL_STOP,
     CTRL_EXIT
@@ -86,13 +85,13 @@ static ctrl_state_t ctrl_state_init(controller_ctx_t* ctx, ctrl_event_msg_t* eve
         ctrl_event_msg_t new_event = { .type = EV_INIT_DONE, .err_code = ESP_OK, .msg=""};
     switch (event->type) {
         case EV_INIT:
+
             // Initialisation du contexte, des ressources, etc.
             ESP_LOGI(TAG, "Initialisation des ressources...");
             // Initialisation des ressources
                 // capteur mpu6050...
             i2c_init();
             ctx->my_reader =mpu_reader_create();
-            ctx->balancer.my_reader = ctx->my_reader;
             if (!ctx->my_reader) {
                 new_event = (ctrl_event_msg_t){EV_ERROR, ESP_ERR_INVALID_ARG, "In CTRL_INIT, failed to initialize MPU reader"};
                 next_state = CTRL_ERROR;
@@ -101,14 +100,13 @@ static ctrl_state_t ctrl_state_init(controller_ctx_t* ctx, ctrl_event_msg_t* eve
 
             //Create Semaphore for synchronized access to output values
             ctx->ctrl_sync_sem=xSemaphoreCreateBinary();
-            ctx->balancer.ctrl_sync_sem = ctx->ctrl_sync_sem;
             if(!ctx->ctrl_sync_sem){
                 new_event = (ctrl_event_msg_t){EV_ERROR, ESP_ERR_INVALID_ARG, "In CTRL_INIT, failed to create MPU semaphore"};
                 next_state = CTRL_ERROR;
                 break;
             }
+
             esp_err_t ret=mpu_reader_set_output_buffer(ctx->my_reader, &ctx->mpu_val,  &ctx->ctrl_sync_sem, &mpu_lock);
-            ctx->balancer.mpu_val = &ctx->mpu_val;
             if (ret!=ESP_OK) {
                 new_event = (ctrl_event_msg_t){EV_ERROR, ESP_ERR_INVALID_ARG, "In CTRL_INIT, failed to initialize MPU reader"};
                 next_state = CTRL_ERROR;
@@ -118,7 +116,6 @@ static ctrl_state_t ctrl_state_init(controller_ctx_t* ctx, ctrl_event_msg_t* eve
 
             //Init balancing - See defines to adjust Kp, Ki and Kd of pid controler
             balance_control_init(&ctx->balance_control, ROBOT_PID_KP_DEFAULT, ROBOT_PID_KI_DEFAULT, ROBOT_PID_KD_DEFAULT, ROBOT_TARGET_ANGLE_DEFAULT, ROBOT_BALANCE_MAX_OUTPUT);   
-            ctx->balancer.balance_control = &ctx->balance_control;
 
             //Motor init 
             ret = drivebase_init(&ctx->drivebase);
@@ -127,12 +124,28 @@ static ctrl_state_t ctrl_state_init(controller_ctx_t* ctx, ctrl_event_msg_t* eve
                 next_state = CTRL_ERROR;
                 break;
             }
-            ctx->balancer.drivebase = &ctx->drivebase;
                 // leds
             led_rgb_init(&ctx->leds);    
             ctx->leds.led_rgb_queue=xQueueCreate(CTRL_QUEUE_SIZE, sizeof(rgb_t));
             if (!ctx->leds.led_rgb_queue) {
                 new_event = (ctrl_event_msg_t){EV_ERROR, ESP_ERR_NO_MEM, "In CTRL_INIT, Failed to create LED RGB queue"};
+                next_state = CTRL_ERROR;
+                break;
+            }
+
+                //Init balance loop
+            balance_loop_config_t config = {
+                .my_reader= ctx->my_reader,
+                .ctrl_sync_sem= ctx->ctrl_sync_sem,
+                .ctrl_event_queue = ctx->ctrl_event_queue,
+                .drivebase=&ctx->drivebase,
+                .mpu_val=&ctx->mpu_val,
+                .balance_control=&ctx->balance_control,
+                .mpu_lock=&mpu_lock
+            };
+            ret = balance_loop_init(&ctx->balancer, &config);
+            if (ret!=ESP_OK) {
+                new_event = (ctrl_event_msg_t){EV_ERROR, ret, "In CTRL_INIT, failed to initialize balance_loop"};
                 next_state = CTRL_ERROR;
                 break;
             }
@@ -409,19 +422,9 @@ static ctrl_state_t ctrl_state_balancing(controller_ctx_t* ctx, ctrl_event_msg_t
             ESP_LOGI(TAG, "State CTRL_BALANCING, Apply speed to motor, Event : %s", ctrl_event_to_str(event->type));
             next_state=CTRL_BALANCING;
 
-            esp_err_t ret = drivebase_start(&ctx->drivebase);
-            if(ret != ESP_OK){
-                new_event = (ctrl_event_msg_t){EV_ERROR, ret, "In CTRL_BALANCING, failed to start the drivebase"};
-                next_state = CTRL_ERROR;
-                xQueueSend(ctx->ctrl_event_queue, &new_event, (TickType_t) 2);
-                break;
-            }
-
-            BaseType_t xTaskReturned = xTaskCreate(balance_loop_task, "balance_loop", 4096, &ctx->balancer, 10, NULL);
-            if(xTaskReturned!=pdPASS){
-                drivebase_stop(&ctx->drivebase);
-                esp_err_t error = ESP_ERR_NO_MEM;
-                new_event = (ctrl_event_msg_t){EV_ERROR, error, "In CTRL_BALANCING, failed to start the balance loop task"};
+            esp_err_t ret = balance_loop_start(&ctx->balancer);
+            if(ret!=ESP_OK){
+                new_event = (ctrl_event_msg_t){EV_ERROR, ret, "In CTRL_BALANCING, failed to start the balance loop task"};
                 next_state = CTRL_ERROR;
                 xQueueSend(ctx->ctrl_event_queue, &new_event, (TickType_t) 2);
                 break;
@@ -560,8 +563,7 @@ void controller_task(void *pvParam){
         return;
     } 
 
-    ctx.balancer.ctrl_event_queue = ctx.ctrl_event_queue;
-    ctx.balancer.mpu_lock = &mpu_lock;
+
 
 
     ctrl_state_t state = CTRL_INIT;
