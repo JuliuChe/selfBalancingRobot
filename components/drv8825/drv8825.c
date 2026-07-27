@@ -4,7 +4,6 @@
 
 #include "esp_log.h"
 #include "esp_rom_sys.h"
-#include "freertos/task.h"
 
 // #include "robot_config.h"
 
@@ -17,13 +16,13 @@
 #define FIXED_STEP_HIGH_TIME 5 //micro seconds
 #define FIXED_STEP_LOW_TIME 2 //micro seconds
 #define PWM_RES (1U*1000U*1000U)
-#define SIN_FREQ_HZ 0.5
 
+
+//HELPERS
 static esp_err_t motor_microstep_config(drv8825_t *drv, drv8825_microstep_t factor);
 static void update_microstepping(drv8825_t *drv, float abs_speed);
 static float apply_accel_limit(float current, float target, float max_accel, float dt);
 static esp_err_t motor_driver_set_speed(drv8825_t* drv, int16_t steps_sec);
-
 static esp_err_t drv8825_set_direction(drv8825_t *drv, uint8_t new_dir);
 static bool drv8825_validate_config(const drv8825_config_t *config);
 static bool microstep_is_valid(drv8825_microstep_t microstep);
@@ -307,52 +306,6 @@ static esp_err_t init_failure_cleanup(drv8825_t * drv,esp_err_t ret) {
 }
 
 
-//TODO : TO BE DELETED LATER
-void drv8825_sine_task(void *pvParameters) {
-    drv8825_t *drv = (drv8825_t*)pvParameters;
-    drv8825_config_t init_config ={
-        GPIO_NUM_1,
-        GPIO_NUM_4,
-        GPIO_NUM_NC,
-        GPIO_NUM_NC,
-        GPIO_NUM_11,
-        GPIO_NUM_10,
-        GPIO_NUM_18,
-        2000,
-        50,
-        HALF_STEP,
-        1000.0f
-    };
-
-    drv8825_init(drv, &init_config);
-    drv8825_start(drv);
-  
-    const float dt = 0.01; //every 10ms a new command is sent
-    const TickType_t delay_ticks=pdMS_TO_TICKS((uint16_t)(dt));
-    float t=0.0;
-    float current_speed = 0.0f;
-    uint8_t loop=0;
-    float target_speed;
-    while(1){
-        target_speed= 2000 *sinf(2*M_PI*SIN_FREQ_HZ*t);
-        current_speed=apply_accel_limit(current_speed, target_speed, drv->config.max_accel, dt);
-        update_microstepping(drv, fabs(current_speed));
-        ESP_LOGI(TAG, "Speed set to %f", current_speed);
-
-        //}
-        motor_driver_set_speed(drv, current_speed);
-        if (loop % 20 == 0) {
-        ESP_LOGI(TAG, "Target: %.1f | Current: %.1f", target_speed, current_speed);
-        loop = 0;
-    }
-        vTaskDelay(delay_ticks);
-        t+=dt;
-        loop+=1;
-
-    }
-}
-
-
 
 //API
 esp_err_t drv8825_init(drv8825_t *drv, const drv8825_config_t *config){
@@ -592,15 +545,13 @@ esp_err_t drv8825_deinit(drv8825_t* drv){
 
 
 esp_err_t drv8825_sleep(drv8825_t* drv, bool enable){
-        if (!drv || drv->config.sleep_pin == GPIO_NUM_NC) return ESP_ERR_INVALID_STATE;
-    gpio_set_level(drv->config.sleep_pin, enable ? 0 : 1); // SLEEP pin : 0 = sleep active 
-    return ESP_OK;
+    if (!drv || drv->config.sleep_pin == GPIO_NUM_NC) return ESP_ERR_INVALID_STATE;
+    return gpio_set_level(drv->config.sleep_pin, enable ? 0 : 1); // SLEEP pin : 0 = sleep active
 }
 
 esp_err_t drv8825_enable(drv8825_t* drv, bool enable){
-        if (!drv || drv->config.enable_pin == GPIO_NUM_NC) return ESP_ERR_INVALID_STATE;
-    gpio_set_level(drv->config.enable_pin, enable ? 0 : 1); // EN pin : 0 = enabled
-    return ESP_OK;
+    if (!drv || drv->config.enable_pin == GPIO_NUM_NC) return ESP_ERR_INVALID_STATE;
+    return gpio_set_level(drv->config.enable_pin, enable ? 0 : 1); // EN pin : 0 = enabled
 }
 
 void drv8825_set_target_speed(drv8825_t *drv, float speed){

@@ -500,7 +500,7 @@ static ctrl_state_t ctrl_state_balancing(controller_ctx_t* ctx, ctrl_event_msg_t
             //TODO Deal with error from start method
             esp_err_t ret = drivebase_start(&ctx->drivebase);
             if(ret != ESP_OK){
-                new_event = (ctrl_event_msg_t){EV_ERROR, ret, "In CTRL_INIT, failed to start the drivebase"};
+                new_event = (ctrl_event_msg_t){EV_ERROR, ret, "In CTRL_BALANCING, failed to start the drivebase"};
                 next_state = CTRL_ERROR;
                 xQueueSend(ctx->ctrl_event_queue, &new_event, (TickType_t) 2);
                 break;

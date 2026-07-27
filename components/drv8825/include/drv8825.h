@@ -34,17 +34,13 @@ typedef struct {
 
     uint16_t max_step_sec;
     uint16_t min_step_sec;
-
     drv8825_microstep_t mode;
+
     float max_accel;
-
-    
-
 } drv8825_config_t;
 
 
 typedef struct{
-    
     float current_speed;
     float target_speed;
     uint8_t current_dir;
@@ -62,7 +58,6 @@ typedef struct{
     bool step_pulse_active; 
 
     drv8825_config_t config;
-
 } drv8825_t;
 
 
@@ -76,10 +71,5 @@ esp_err_t drv8825_enable(drv8825_t* drv, bool enable);
 void drv8825_set_target_speed(drv8825_t *drv, float speed);
 esp_err_t drv8825_update(drv8825_t* drv, float dt);
 bool drv8825_is_running(drv8825_t* drv); //OK
-
-
-//TODO Only to test motor control
-void drv8825_sine_task(void *pvParameters);
-
 
 #endif

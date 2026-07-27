@@ -44,38 +44,6 @@ leds->led_rgb_queue = NULL;
 leds->running=false;
 }
 
-static void blink_led(led_rgb_t* leds, rgb_t* my_col)
-{
-    /* If the addressable LED is enabled */
-    if (leds->s_led_state) {
-
-        /* Set the LED pixel using RGB from 0 (0%) to 255 (100%) for each color */
-        uint8_t step=5;
-        uint8_t red=0;
-        uint8_t green=0;
-        uint8_t blue=0;
-        while(red<my_col->red || green<my_col->green || blue<my_col->blue){
-
-            if (red<my_col->red) red+=step;
-            if (green<my_col->green) green+=step;
-            if (blue<my_col->blue) blue+=step;
-            led_strip_set_pixel(leds->led_strip, 0, red, green, blue);
-            /* Refresh the strip to send data */
-            esp_err_t err=led_strip_refresh(leds->led_strip);
-            if(err!= ESP_OK) {
-                ESP_LOGE(TAG, "Error refreshing LED strip: %s", esp_err_to_name(err));
-            }
-            //ESP_LOGI(TAG, "Refresh R=%d G=%d B=%d | %s", red, green, blue, esp_err_to_name(err));
- 
-            vTaskDelay(pdMS_TO_TICKS(20));
-        }
-        //led_strip_set_pixel(led_strip, 0, my_col->red, my_col->green, my_col->blue);
-        /* Refresh the strip to send data */
-    } else {
-        /* Set all LED off to clear all pixels */
-        led_strip_clear(leds->led_strip);
-    }
-}
 
 static void blink_led_interruptible(led_rgb_t* leds, rgb_t* my_col)
 {
@@ -86,14 +54,6 @@ static void blink_led_interruptible(led_rgb_t* leds, rgb_t* my_col)
         uint8_t blue=0;
 
         while(red < my_col->red || green < my_col->green || blue < my_col->blue){
-            // Check for new color
-            // rgb_t new_col;
-            // if (xQueueReceive(leds->led_rgb_queue, &new_col, 0)) {
-            //     ESP_LOGI(TAG, "Interrupting fade-in with new color!");
-            //     // Recurse with new color (restart fade-in)
-            //     blink_led_interruptible(leds, &new_col);
-            //     return; // Exit current fade-in
-            // }
 
             if (red < my_col->red) red += step;
             if (green < my_col->green) green += step;
