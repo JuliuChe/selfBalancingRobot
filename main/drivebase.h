@@ -13,7 +13,7 @@ esp_err_t drivebase_start(drivebase_t *drivebase);
 esp_err_t drivebase_stop(drivebase_t *drivebase);
 esp_err_t drivebase_deinit(drivebase_t *drivebase);
 
-void drivebase_apply_balance(
+esp_err_t drivebase_apply_balance(
     drivebase_t *drivebase,
     float balance_command,
     float dt

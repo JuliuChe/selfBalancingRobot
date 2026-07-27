@@ -74,7 +74,7 @@ esp_err_t drv8825_deinit(drv8825_t* drv);
 esp_err_t drv8825_sleep(drv8825_t* drv, bool enable);
 esp_err_t drv8825_enable(drv8825_t* drv, bool enable);
 void drv8825_set_target_speed(drv8825_t *drv, float speed);
-void drv8825_update(drv8825_t* drv, float dt);
+esp_err_t drv8825_update(drv8825_t* drv, float dt);
 bool drv8825_is_running(drv8825_t* drv); //OK
 
 

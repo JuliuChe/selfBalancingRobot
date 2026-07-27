@@ -85,7 +85,7 @@ typedef enum {
         int count;
     } logs_ctrl_buffer_t;
 
- logs_ctrl_buffer_t log_buffer = { .index = 0, .count = 0 };
+static logs_ctrl_buffer_t log_buffer = { .index = 0, .count = 0 };
 
 void log_ctrl_print(const logs_ctrl_buffer_t* buf) {
     for (int i = 0; i < buf->count; i++) {
@@ -110,7 +110,7 @@ void motor_control_task(void *pvParam){
     // uint16_t check_roll=0;
     struct timeval last_time;
     gettimeofday(&last_time, NULL); // Init du timer
-    
+
     while(1){
         if(xSemaphoreTake(ctx->ctrl_sync_sem, pdMS_TO_TICKS(50))!=pdTRUE){
             if(!mpu_reader_is_connected(ctx->my_reader)){
@@ -149,9 +149,15 @@ void motor_control_task(void *pvParam){
             xQueueSend(ctx->ctrl_event_queue, &event, 0);
             break;
         }
-        float command=balance_control_compute(&ctx->balance_control, roll, roll_speed, dt);
 
-        drivebase_apply_balance(&ctx->drivebase, command, dt);
+        float command=balance_control_compute(&ctx->balance_control, roll, roll_speed, dt);
+        esp_err_t ret_bal = drivebase_apply_balance(&ctx->drivebase, command, dt);
+        if(ret_bal != ESP_OK){
+            drivebase_stop(&ctx->drivebase);
+            ctrl_event_msg_t event = {.type = EV_ERROR,.err_code = ret_bal, .msg = "Impossible to apply speed command to motors"};
+            xQueueSend(ctx->ctrl_event_queue, &event, 0);
+            break;
+        }
     
         vTaskDelay(pdMS_TO_TICKS(1));
     }
@@ -207,7 +213,7 @@ static ctrl_state_t ctrl_state_init(controller_ctx_t* ctx, ctrl_event_msg_t* eve
             //Motor init 
             ret = drivebase_init(&ctx->drivebase);
             if (ret!=ESP_OK) {
-                new_event = (ctrl_event_msg_t){EV_ERROR, ESP_ERR_INVALID_ARG, "In CTRL_INIT, failed to initialize motor drivebase"};
+                new_event = (ctrl_event_msg_t){EV_ERROR, ret, "In CTRL_INIT, failed to initialize motor drivebase"};
                 next_state = CTRL_ERROR;
                 break;
             }
@@ -492,7 +498,13 @@ static ctrl_state_t ctrl_state_balancing(controller_ctx_t* ctx, ctrl_event_msg_t
             ESP_LOGI(TAG, "State CTRL_BALANCING, Apply speed to motor, Event : %s", ctrl_event_to_str(event->type));
             next_state=CTRL_BALANCING;
             //TODO Deal with error from start method
-            ESP_ERROR_CHECK(drivebase_start(&ctx->drivebase));
+            esp_err_t ret = drivebase_start(&ctx->drivebase);
+            if(ret != ESP_OK){
+                new_event = (ctrl_event_msg_t){EV_ERROR, ret, "In CTRL_INIT, failed to start the drivebase"};
+                next_state = CTRL_ERROR;
+                xQueueSend(ctx->ctrl_event_queue, &new_event, (TickType_t) 2);
+                break;
+            }
             xTaskCreate(motor_control_task, "controller_task", 4096, ctx, 10, NULL);
             break;
         case EV_STOP_BALANCING:
@@ -515,7 +527,11 @@ static ctrl_state_t ctrl_state_balancing(controller_ctx_t* ctx, ctrl_event_msg_t
             drivebase_stop(&ctx->drivebase);
             xQueueSend(ctx->ctrl_event_queue, &new_event, (TickType_t) 2);
             break;
-
+        case EV_ERROR:
+            next_state = CTRL_ERROR;
+            new_event = (ctrl_event_msg_t){EV_ERROR, event->err_code, event->msg};
+            xQueueSend(ctx->ctrl_event_queue, &new_event, (TickType_t) 2);
+            break;
         default:
             snprintf(msg_buf, sizeof(msg_buf), "Unexpected event in CTRL_NEW_MEASUREMNT state: %s", ctrl_event_to_str(event->type));
             new_event = (ctrl_event_msg_t){EV_ERROR, ESP_ERR_INVALID_STATE, msg_buf };
@@ -550,7 +566,7 @@ static ctrl_state_t ctrl_state_error(controller_ctx_t* ctx, ctrl_event_msg_t* ev
     xQueueSend(ctx->leds.led_rgb_queue, &error_col, (TickType_t) 2); // Set error color purple
     
     ctx->my_timer_context.event_to_send=(ctrl_event_msg_t){EV_STOP, ESP_OK, NULL}; // Set the event to send when the timer expires
-    esp_err_t  ret = timer_ctrl_start(ctx->my_timer_context, 8000, NULL);
+    esp_err_t  ret = timer_ctrl_start(ctx->my_timer_context, 5000, NULL);
     if(ret!=ESP_OK){
         ctrl_event_msg_t new_event=(ctrl_event_msg_t){EV_STOP, ret, NULL};
         xQueueSend(ctx->ctrl_event_queue, &new_event, (TickType_t) 5);
