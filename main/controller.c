@@ -4,8 +4,6 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "freertos/timers.h"
-#include <time.h>
-#include <sys/time.h>
 #include <math.h>
 
 #include "my_i2c.h"
@@ -14,12 +12,12 @@
 #include "drivebase.h"
 #include "balance_loop.h"
 
-
+#include "robot_config.h"
 #include "controller.h"
 #include "controller_events.h"
 #include "balance_control.h"
 #include "timer_controller.h"
-#include "robot_config.h"
+
 
 
 #define CTRL_QUEUE_SIZE 32 // Size of the queue for MPU6050 data frames
@@ -70,37 +68,6 @@ typedef enum {
 
     static char msg_buf[64]; // Buffer for event messages
     
-    typedef struct{
-        float roll;
-        float dt;
-        float pid;
-        float mot_dt;
-    }logs_ctrl_t;
-    #define LOG_BUFFER_SIZE 256 // Size of the log buffer
-    typedef struct {
-        logs_ctrl_t buffer[LOG_BUFFER_SIZE];
-        int index;
-        int count;
-    } logs_ctrl_buffer_t;
-
-static logs_ctrl_buffer_t log_buffer = { .index = 0, .count = 0 };
-
-void log_ctrl_print(const logs_ctrl_buffer_t* buf) {
-    for (int i = 0; i < buf->count; i++) {
-        //int idx = (buf->index + i) % LOG_BUFFER_SIZE;
-        logs_ctrl_t l = buf->buffer[i];
-        ESP_LOGI(TAG, "Roll: %.2f, dt: %.4f, PID: %.2f, mot_dt: %.4f, buff_count: %d", l.roll, l.dt, l.pid, l.mot_dt, buf->count);
-    }
-    ESP_LOGI(TAG, "------------------------------------------------------");
-    
- }
-
-void log_ctrl_add(logs_ctrl_buffer_t* buf, float roll, float dt, float pid, float mot_dt) {
-    buf->buffer[buf->index] = (logs_ctrl_t){roll, dt, pid, mot_dt};
-    buf->index = (buf->index + 1) % LOG_BUFFER_SIZE;
-    if (buf->count < LOG_BUFFER_SIZE) buf->count++;
-}
-
 
 // Handler prototype
  //Functions processing a state
@@ -463,9 +430,6 @@ static ctrl_state_t ctrl_state_balancing(controller_ctx_t* ctx, ctrl_event_msg_t
         case EV_STOP_BALANCING:
             next_state = CTRL_START_MPU;
             new_event = (ctrl_event_msg_t){EV_ROBOT_LYING, ESP_OK, NULL};
-            log_ctrl_print(&log_buffer);
-            log_buffer.index = 0; // Reset index after printing
-            log_buffer.count = 0; // Reset count after printing
     
             //TODO Deal with error from stop method
             drivebase_stop(&ctx->drivebase);
@@ -495,10 +459,7 @@ static ctrl_state_t ctrl_state_balancing(controller_ctx_t* ctx, ctrl_event_msg_t
     return next_state;
 }
 
-//TODO : prepare API to gather commands in Bluetooth from external device, modify INIT_STATE to start Bluetooth "listener"
-static ctrl_state_t ctrl_state_remote_control(controller_ctx_t* ctx, ctrl_event_msg_t* event){
-    return CTRL_STOP;
-}
+
 
 static ctrl_state_t ctrl_state_error(controller_ctx_t* ctx, ctrl_event_msg_t* event){
     ESP_LOGE(TAG, "Error occurred!");
@@ -577,7 +538,6 @@ static const ctrl_state_handler_t state_handlers[] = {
     //{ CTRL_BALANCING_INIT,      ctrl_state_balancing_init},
     //{ CTRL_NEW_MEASUREMENT, ctrl_state_new_meas},
     { CTRL_BALANCING, ctrl_state_balancing},
-    { CTRL_REMOTE_CONTROL, ctrl_state_remote_control},
     { CTRL_ERROR,          ctrl_state_error },
     { CTRL_STOP,           ctrl_state_stop },
     // Ajoute tes autres états ici

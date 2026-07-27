@@ -16,8 +16,8 @@
 
 typedef struct{
   mpu_reader_t *my_reader;
-  SemaphoreHandle_t ctrl_sync_sem; 
-  QueueHandle_t ctrl_event_queue; 
+  SemaphoreHandle_t ctrl_sync_sem;
+  QueueHandle_t ctrl_event_queue;
   drivebase_t *drivebase;
   mpu_values_t *mpu_val;
   balance_control_t *balance_control;
