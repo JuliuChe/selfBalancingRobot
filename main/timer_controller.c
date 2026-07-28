@@ -10,12 +10,12 @@ static void timer_callback(TimerHandle_t xTimer) {
 
     timer_event_context_t *ctx = (timer_event_context_t *) pvTimerGetTimerID(xTimer);
 
-    if (ctx != NULL) {
-        ESP_LOGI(TAG, "Sending event from timer controller: %s", ctrl_event_to_str(ctx->event_to_send.type));
-        xQueueSend(ctx->timer_event_queue, &ctx->event_to_send, 0);
-    }
+    if(!ctx) return;
 
-    free(ctx);
+    QueueHandle_t queue = ctx->timer_event_queue;
+    ctrl_event_msg_t event = ctx->event_to_send;
+
+
 
     for (int j = 0; j < MAX_TIMERS; j++) {
         if (timers[j] == xTimer) {
@@ -23,7 +23,17 @@ static void timer_callback(TimerHandle_t xTimer) {
             break;
         }
     }
+
+    vTimerSetTimerID(xTimer, NULL);
+
+    free(ctx);
+
     xTimerDelete(xTimer, 0);
+
+
+    ESP_LOGI(TAG, "Sending event from timer controller: %s", ctrl_event_to_str(event.type));
+    xQueueSend(queue, &event, 0);
+
 }
 
 esp_err_t timer_ctrl_start(timer_event_context_t ctx, uint32_t timeout_ms, TimerHandle_t* out_timer) {
@@ -66,8 +76,10 @@ esp_err_t timer_ctrl_cancel(TimerHandle_t timer) {
             timers[i] = NULL;
             xTimerStop(timer, 0);
             timer_event_context_t* ev = (timer_event_context_t*) pvTimerGetTimerID(timer);
-            free(ev);
+            vTimerSetTimerID(timer, NULL);
+            if(ev) free(ev);
             xTimerDelete(timer, 0);
+
             return ESP_OK;
         }
     }
@@ -78,13 +90,15 @@ esp_err_t timer_ctrl_stop_all() {
     
     for (int i = 0; i < MAX_TIMERS; i++) {
         if (timers[i] != NULL) {
-            xTimerStop(timers[i], 0);
-            timer_event_context_t* ev = (timer_event_context_t*) pvTimerGetTimerID(timers[i]);
-            free(ev);
-            xTimerDelete(timers[i], 0);
+            TimerHandle_t timer = timers[i];
             timers[i] = NULL;
-            return ESP_OK;
+            xTimerStop(timer, 0);
+            timer_event_context_t* ev = (timer_event_context_t*) pvTimerGetTimerID(timer);
+            vTimerSetTimerID(timer, NULL);
+            if(ev) free(ev);
+            xTimerDelete(timer, 0);
+
         }
     }
-    return ESP_ERR_NOT_FOUND;
+    return ESP_OK;
 }

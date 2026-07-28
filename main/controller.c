@@ -415,14 +415,14 @@ static ctrl_state_t ctrl_state_lost_mpu(controller_ctx_t* ctx, ctrl_event_msg_t*
 static ctrl_state_t ctrl_state_balancing(controller_ctx_t* ctx, ctrl_event_msg_t* event){
     ctrl_event_msg_t new_event={.type=EV_NONE, .err_code=ESP_OK, .msg=NULL};
     ctrl_state_t next_state = CTRL_BALANCING;
-
+    esp_err_t ret;
      switch(event->type) {
         case EV_START_BALANCE:
             xQueueSend(ctx->leds.led_rgb_queue, &ready_col, (TickType_t) 2); 
             ESP_LOGI(TAG, "State CTRL_BALANCING, Apply speed to motor, Event : %s", ctrl_event_to_str(event->type));
             next_state=CTRL_BALANCING;
 
-            esp_err_t ret = balance_loop_start(&ctx->balancer);
+            ret = balance_loop_start(&ctx->balancer);
             if(ret!=ESP_OK){
                 new_event = (ctrl_event_msg_t){EV_ERROR, ret, "In CTRL_BALANCING, failed to start the balance loop task"};
                 next_state = CTRL_ERROR;
@@ -430,24 +430,36 @@ static ctrl_state_t ctrl_state_balancing(controller_ctx_t* ctx, ctrl_event_msg_t
                 break;
             }
             break;
+
         case EV_STOP_BALANCING:
-            next_state = CTRL_START_MPU;
-            new_event = (ctrl_event_msg_t){EV_ROBOT_LYING, ESP_OK, NULL};
-    
-            //TODO Deal with error from stop method
-            drivebase_stop(&ctx->drivebase);
+            ret=balance_loop_stop(&ctx->balancer);
+            if(ret!=ESP_OK){
+                next_state = CTRL_ERROR;
+                new_event = (ctrl_event_msg_t){EV_ERROR, ret, "While stopping the balance loop"};
+            } else{
+                next_state = CTRL_START_MPU;
+                new_event = (ctrl_event_msg_t){EV_ROBOT_LYING, ret, NULL};
+            }
             xQueueSend(ctx->ctrl_event_queue, &new_event, (TickType_t) 2);
-            
             break;
 
         case EV_LOST_MPU:
-            next_state = CTRL_LOST_MPU;
-            new_event = (ctrl_event_msg_t){EV_LOST_MPU, ESP_OK, NULL};
-            //TODO Deal with error from stop method
-            drivebase_stop(&ctx->drivebase);
+            ret=balance_loop_stop(&ctx->balancer);
+            if(ret!=ESP_OK){
+                next_state = CTRL_ERROR;
+                new_event = (ctrl_event_msg_t){EV_ERROR, ret, "While stopping the balance loop"};
+            } else{
+                next_state = CTRL_LOST_MPU;
+                new_event = (ctrl_event_msg_t){EV_LOST_MPU, ret, NULL};
+            }
             xQueueSend(ctx->ctrl_event_queue, &new_event, (TickType_t) 2);
             break;
         case EV_ERROR:
+            ret=balance_loop_stop(&ctx->balancer);
+            if(ret!=ESP_OK){
+                ESP_LOGE(TAG, "Problem while stopping %s", esp_err_to_name(ret));
+            }
+
             next_state = CTRL_ERROR;
             new_event = (ctrl_event_msg_t){EV_ERROR, event->err_code, event->msg};
             xQueueSend(ctx->ctrl_event_queue, &new_event, (TickType_t) 2);
@@ -495,21 +507,35 @@ static ctrl_state_t ctrl_state_error(controller_ctx_t* ctx, ctrl_event_msg_t* ev
 
 static ctrl_state_t ctrl_state_stop(controller_ctx_t* ctx, ctrl_event_msg_t* event){
 
-     ctrl_state_t next_state = CTRL_STOP;
+    ctrl_state_t next_state = CTRL_STOP;
+    esp_err_t ret;
     if(event->type == EV_STOP){
         ESP_LOGI(TAG, "Stopping controller...");
-             //Free the reader's memory
+        //STOP balance loop
+        ret = balance_loop_deinit(&ctx->balancer);
+        if(ret==ESP_ERR_TIMEOUT) {
+            ctrl_event_msg_t retry_event = {.type = EV_STOP, .err_code = ret,.msg = "Retrying balance loop stop"};
+            xQueueSend(ctx->ctrl_event_queue, &retry_event, 0);
+            return CTRL_STOP;
+        }
+        if(ret!=ESP_OK){
+            ESP_LOGE(TAG, "Error while de initializing the balance loop %s", esp_err_to_name(ret));
+        }
+
+        //Stops the TImer
+        timer_ctrl_stop_all();
+        ctx->my_timer = NULL; // Clear the timer pointer
+
+        //Free the reader's memory
         if (ctx->my_reader) {
-            mpu_reader_stop(ctx->my_reader); // Stop the MPU reader
-            if(ctx->ctrl_event_queue){
-                ESP_LOGI(TAG, "Deleting user queue...");
-                vQueueDelete(ctx->ctrl_event_queue); // Delete the user queue
-                ctx->ctrl_event_queue =NULL; 
-            }
-            
+            mpu_reader_stop(ctx->my_reader);// Stop the MPU reader
             ctx->my_reader = NULL; // Clear the pointer
-        } else {
-            free(ctx->my_reader); // Free the memory if my_reader is NULL
+        }
+
+        //Delete ctrl_sync_sem semaphore
+        if(ctx->ctrl_sync_sem){
+            vSemaphoreDelete(ctx->ctrl_sync_sem);
+            ctx->ctrl_sync_sem=NULL;
         }
 
         //DeInit motor controller
@@ -521,9 +547,14 @@ static ctrl_state_t ctrl_state_stop(controller_ctx_t* ctx, ctrl_event_msg_t* eve
         ctx->leds.running = false; // Set the LED task running flag to false
         vTaskDelay(pdMS_TO_TICKS(1000)); // Delay to ensure the LED task stops
 
-        //Stops the TImer
-        timer_ctrl_stop_all();
-        ctx->my_timer = NULL; // Clear the timer pointer
+        //Delete the queue (remain in the end)
+        if(ctx->ctrl_event_queue){
+            ESP_LOGI(TAG, "Deleting user queue...");
+            vQueueDelete(ctx->ctrl_event_queue); // Delete the user queue
+            ctx->ctrl_event_queue =NULL;
+        }
+
+
         ESP_LOGI(TAG, "Controller stopped.");
     
         next_state= CTRL_EXIT;

@@ -34,7 +34,8 @@ typedef enum {
 typedef struct{
   balance_loop_config_t balance_config;
   TaskHandle_t task_handle;
-  balance_loop_state_t state;
+  volatile balance_loop_state_t state;
+  SemaphoreHandle_t task_stopped_sem;
 
 } balance_loop_t;
 
@@ -42,8 +43,8 @@ typedef struct{
 
 esp_err_t balance_loop_init(balance_loop_t* bal, const balance_loop_config_t* config);
 esp_err_t balance_loop_start(balance_loop_t* bal);
-// void balance_loop_stop(balance_loop_t* bal);
-// void balance_loop_deinit(balance_loop_t* bal);
-// bool balance_loop_is_running(balance_loop_t* bal);
+esp_err_t balance_loop_stop(balance_loop_t* bal);
+esp_err_t balance_loop_deinit(balance_loop_t* bal);
+bool balance_loop_is_running(balance_loop_t* bal);
 
 #endif
